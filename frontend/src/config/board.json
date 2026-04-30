@@ -1,0 +1,29 @@
+{
+  "boardSize": 8,
+  "rows": [
+    { "id": "czapeczka", "label": "czapeczka", "icon": "HardHat" },
+    { "id": "szczepienie", "label": "szczepienie", "icon": "Syringe" },
+    { "id": "sztuczka", "label": "sztuczka", "icon": "WandSparkles" },
+    { "id": "zeglarz", "label": "żeglarz", "icon": "Ship" },
+    { "id": "zuczek", "label": "żuczek", "icon": "Bug" },
+    { "id": "deszcz", "label": "deszcz", "icon": "CloudRain" },
+    { "id": "plazowicz", "label": "plażowicz", "icon": "Sun" },
+    { "id": "przyczepa", "label": "przyczepa", "icon": "Caravan" }
+  ],
+  "columns": [
+    { "id": "zaroweczka", "label": "żaróweczka", "icon": "Lightbulb" },
+    { "id": "rzeczka", "label": "rzeczka", "icon": "Waves" },
+    { "id": "szczypiorek", "label": "szczypiorek", "icon": "Leaf" },
+    { "id": "pieprzniczka", "label": "pieprzniczka", "icon": "Pepper" },
+    { "id": "pszczolka", "label": "pszczółka", "icon": "Bee" },
+    { "id": "pozyczka", "label": "pożyczka", "icon": "Coins" },
+    { "id": "czaszka", "label": "czaszka", "icon": "Skull" },
+    { "id": "paszcza", "label": "paszcza", "icon": "Smile" }
+  ],
+  "ships": [
+    { "size": 4, "count": 1 },
+    { "size": 3, "count": 2 },
+    { "size": 2, "count": 3 },
+    { "size": 1, "count": 4 }
+  ]
+}

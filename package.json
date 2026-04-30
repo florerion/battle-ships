@@ -1,0 +1,27 @@
+{
+  "name": "battleships",
+  "version": "1.0.0",
+  "description": "Logopedyczne statki - monorepo",
+  "main": "index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "build": "npm run build --prefix backend && npm run build --prefix frontend"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/florerion/battle-ships.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/florerion/battle-ships/issues"
+  },
+  "homepage": "https://github.com/florerion/battle-ships#readme",
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
