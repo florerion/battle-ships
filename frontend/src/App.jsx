@@ -2,7 +2,7 @@ import { Fragment, useMemo, useState } from 'react'
 import { DndContext, useDraggable, useDroppable } from '@dnd-kit/core'
 import { io } from 'socket.io-client'
 import * as icons from 'lucide-react'
-import { Volume2, Copy, CheckCircle2, Link2, RotateCw, Ship } from 'lucide-react'
+import { Volume2, Copy, CheckCircle2, Link2, RotateCw, Ship, Droplets, Flame, Skull } from 'lucide-react'
 import boardConfig from './config/board.json'
 import { speakWord } from './utils/speech'
 import './App.css'
@@ -313,9 +313,9 @@ function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick 
                     onClick={isShootable ? () => onCellClick(rowIndex, colIndex) : undefined}
                     onKeyDown={isShootable ? (e) => { if (e.key === 'Enter' || e.key === ' ') onCellClick(rowIndex, colIndex) } : undefined}
                   >
-                    {marker === 'hit' && <span className="game-marker game-marker-hit" aria-hidden="true">🔥</span>}
-                    {marker === 'miss' && <span className="game-marker game-marker-miss" aria-hidden="true">•</span>}
-                    {marker === 'sunk' && <span className="game-marker game-marker-sunk" aria-hidden="true">✕</span>}
+                    {marker === 'hit' && <Flame className="game-marker game-marker-hit" aria-hidden="true" />}
+                    {marker === 'miss' && <Droplets className="game-marker game-marker-miss" aria-hidden="true" />}
+                    {marker === 'sunk' && <Skull className="game-marker game-marker-sunk" aria-hidden="true" />}
                   </div>
                 )
               })}
@@ -325,6 +325,38 @@ function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick 
       </div>
     </div>
   )
+}
+
+function autoPlaceShips(shipPool, boardSize) {
+  for (let retry = 0; retry < 30; retry += 1) {
+    const newShips = shipPool.map((s) => ({ ...s, row: null, col: null, orientation: 'horizontal' }))
+    let failed = false
+
+    for (let i = 0; i < newShips.length; i += 1) {
+      let placed = false
+
+      for (let attempt = 0; attempt < 400; attempt += 1) {
+        const orientation = Math.random() < 0.5 ? 'horizontal' : 'vertical'
+        const maxRow = orientation === 'vertical' ? boardSize - newShips[i].size : boardSize - 1
+        const maxCol = orientation === 'horizontal' ? boardSize - newShips[i].size : boardSize - 1
+        if (maxRow < 0 || maxCol < 0) continue
+        const row = Math.floor(Math.random() * (maxRow + 1))
+        const col = Math.floor(Math.random() * (maxCol + 1))
+        const candidate = { ...newShips[i], orientation, row, col }
+        const occupied = buildOccupiedMap(newShips)
+        if (canPlaceShip(candidate, row, col, occupied, boardSize)) {
+          newShips[i] = candidate
+          placed = true
+          break
+        }
+      }
+
+      if (!placed) { failed = true; break }
+    }
+
+    if (!failed) return newShips
+  }
+  return null
 }
 
 function App() {
@@ -425,6 +457,23 @@ function App() {
     })
   }
 
+  function setupSocketListeners(socket) {
+    socket.off('room:state')
+    socket.off('game:started')
+    socket.off('game:state')
+    socket.on('room:state', (nextState) => {
+      setRoomState((prev) => {
+        if (prev?.game?.phase === 'finished' && nextState?.game?.phase === 'waiting') {
+          setShips(makeShipPool())
+          setSetupError('')
+        }
+        return nextState
+      })
+    })
+    socket.on('game:started', (nextState) => { setRoomState(nextState) })
+    socket.on('game:state', (nextState) => { setRoomState(nextState) })
+  }
+
   async function createRoom() {
     setError('')
     const response = await withCallback('room:create', { playerName })
@@ -435,13 +484,7 @@ function App() {
 
     setRoomState(response.room)
     setShips(makeShipPool())
-    const socket = getSocket()
-    socket.off('room:state')
-    socket.off('game:started')
-    socket.off('game:state')
-    socket.on('room:state', (nextState) => { setRoomState(nextState) })
-    socket.on('game:started', (nextState) => { setRoomState(nextState) })
-    socket.on('game:state', (nextState) => { setRoomState(nextState) })
+    setupSocketListeners(getSocket())
   }
 
   async function joinRoom() {
@@ -458,13 +501,7 @@ function App() {
 
     setRoomState(response.room)
     setShips(makeShipPool())
-    const socket = getSocket()
-    socket.off('room:state')
-    socket.off('game:started')
-    socket.off('game:state')
-    socket.on('room:state', (nextState) => { setRoomState(nextState) })
-    socket.on('game:started', (nextState) => { setRoomState(nextState) })
-    socket.on('game:state', (nextState) => { setRoomState(nextState) })
+    setupSocketListeners(getSocket())
   }
 
   function fillFromUrlRoom() {
@@ -646,6 +683,15 @@ function App() {
     }
   }
 
+  async function rematch() {
+    if (!roomState?.roomId) return
+    const response = await withCallback('game:rematch', { roomId: roomState.roomId })
+    if (!response?.ok) return
+    setShips(makeShipPool())
+    setSetupError('')
+    setRoomState(response.room)
+  }
+
   return (
     <div className="app-shell">
       <section className="container py-4 py-md-5">
@@ -696,6 +742,14 @@ function App() {
                 )}
                 {game.phase === 'playing' && isMyTurn && (
                   <div className="alert alert-success py-2 mb-3">👆 Kliknij w komórkę, żeby strzelić!</div>
+                )}
+                {game.phase === 'finished' && (
+                  <div className={`alert py-2 mb-3 ${game.winnerPlayerId === myId ? 'alert-success' : 'alert-danger'}`}>
+                    {game.winnerPlayerId === myId ? '🎉 Wygrałeś!' : '😢 Tym razem przegrałeś.'}
+                    <button type="button" className="btn btn-primary btn-sm ms-3" onClick={rematch}>
+                      Zagraj jeszcze raz
+                    </button>
+                  </div>
                 )}
                 <StaticGameBoard
                   ships={opponentShipsForReview}
@@ -816,11 +870,21 @@ function App() {
                 <DndContext onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleShipDrop} onDragCancel={handleDragCancel}>
                   <div className="row g-3">
                     <div className="col-12">
-                      <div className="d-flex flex-wrap gap-2">
+                      <div className="d-flex flex-wrap gap-2 align-items-start">
                         {ships.map((ship) => (
                           <ShipDraggable key={ship.id} ship={ship} onRotate={rotateShip} onReset={resetShip} />
                         ))}
                       </div>
+                      <button
+                        type="button"
+                        className="btn btn-outline-secondary btn-sm mt-2"
+                        onClick={() => {
+                          const placed = autoPlaceShips(makeShipPool(), boardConfig.boardSize)
+                          if (placed) { setShips(placed); setSetupError('') }
+                        }}
+                      >
+                        🎲 Ustaw Statki Losowo
+                      </button>
                     </div>
 
                     <div className="col-12">

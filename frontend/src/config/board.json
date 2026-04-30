@@ -14,8 +14,8 @@
     { "id": "zaroweczka", "label": "żaróweczka", "icon": "Lightbulb" },
     { "id": "rzeczka", "label": "rzeczka", "icon": "Waves" },
     { "id": "szczypiorek", "label": "szczypiorek", "icon": "Leaf" },
-    { "id": "pieprzniczka", "label": "pieprzniczka", "icon": "Pepper" },
-    { "id": "pszczolka", "label": "pszczółka", "icon": "Bee" },
+    { "id": "pieprzniczka", "label": "pieprzniczka", "icon": "Cherry" },
+    { "id": "pszczolka", "label": "pszczółka", "icon": "Flower2" },
     { "id": "pozyczka", "label": "pożyczka", "icon": "Coins" },
     { "id": "czaszka", "label": "czaszka", "icon": "Skull" },
     { "id": "paszcza", "label": "paszcza", "icon": "Smile" }

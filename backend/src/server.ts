@@ -291,6 +291,33 @@ io.on('connection', (socket) => {
   );
 
   socket.on(
+    'game:rematch',
+    (payload: { roomId?: string }, callback?: (response: unknown) => void) => {
+      const roomId = payload?.roomId?.trim();
+      if (!roomId) { callback?.({ ok: false, error: 'Brak kodu pokoju.' }); return; }
+
+      const room = rooms.get(roomId);
+      if (!room) { callback?.({ ok: false, error: 'Pokoj nie istnieje.' }); return; }
+      if (room.gamePhase !== 'finished') { callback?.({ ok: false, error: 'Gra nie jest zakonczona.' }); return; }
+
+      const playerInRoom = room.players.some((p) => p.id === socket.id);
+      if (!playerInRoom) { callback?.({ ok: false, error: 'Gracz nie nalezy do tego pokoju.' }); return; }
+
+      // Reset game state, keep players
+      room.readyByPlayerId = Object.fromEntries(room.players.map((p) => [p.id, false]));
+      room.boardByPlayerId = {};
+      room.shots = [];
+      room.currentTurnPlayerId = null;
+      room.gamePhase = 'waiting';
+      room.winnerPlayerId = null;
+
+      const publicState = getPublicRoomState(room);
+      io.to(roomId).emit('room:state', publicState);
+      callback?.({ ok: true, room: publicState });
+    },
+  );
+
+  socket.on(
     'game:shoot',
     (payload: { roomId?: string; row?: number; col?: number }, callback?: (response: unknown) => void) => {
       const roomId = payload?.roomId?.trim();

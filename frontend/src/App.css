@@ -194,15 +194,23 @@
 }
 
 .game-marker {
-  font-size: 1.1rem;
-  line-height: 1;
+  width: 20px;
+  height: 20px;
   pointer-events: none;
   user-select: none;
+  flex-shrink: 0;
+}
+
+.game-marker-hit {
+  color: #dc3545;
+}
+
+.game-marker-miss {
+  color: #0d6efd;
 }
 
 .game-marker-sunk {
   color: #ffffff;
-  font-style: normal;
 }
 
 @media (max-width: 767px) {
