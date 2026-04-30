@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: logopedyczne-statki-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: CLIENT_URL
+        sync: false   # ustaw ręcznie w Render dashboard po poznaniu URL frontendu
