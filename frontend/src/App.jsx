@@ -252,6 +252,81 @@ function BoardCell({ id, children, previewStatus, previewSegmentClass }) {
   )
 }
 
+function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick }) {
+  const boardSize = boardConfig.boardSize
+
+  const shipCellsMap = useMemo(() => {
+    if (!ships) return {}
+    const map = {}
+    ships.forEach((ship) => {
+      for (let i = 0; i < ship.size; i += 1) {
+        const row = ship.row + (ship.orientation === 'vertical' ? i : 0)
+        const col = ship.col + (ship.orientation === 'horizontal' ? i : 0)
+        map[`${row}-${col}`] = ship.id
+      }
+    })
+    return map
+  }, [ships])
+
+  return (
+    <div className="board-wrap">
+      <div className="board-grid" style={{ gridTemplateColumns: `90px repeat(${boardSize}, minmax(32px, 1fr))` }}>
+        <div className="board-corner" />
+        {boardConfig.columns.map((column) => {
+          const Icon = icons[column.icon] || icons.Square
+          return (
+            <button key={column.id} type="button" className="board-axis" title={column.label} onClick={() => speakWord(column.label)}>
+              <Icon size={16} />
+            </button>
+          )
+        })}
+
+        {boardConfig.rows.map((row, rowIndex) => {
+          const RowIcon = icons[row.icon] || icons.Square
+          return (
+            <Fragment key={row.id}>
+              <button key={`${row.id}-axis`} type="button" className="board-axis" title={row.label} onClick={() => speakWord(row.label)}>
+                <RowIcon size={16} />
+              </button>
+              {boardConfig.columns.map((column, colIndex) => {
+                const cellKey = `${rowIndex}-${colIndex}`
+                const hasShip = Boolean(shipCellsMap[cellKey])
+                const marker = shotMarkers?.[cellKey]
+                const isShootable = isClickable && myTurn && !marker
+
+                const classNames = [
+                  'board-cell',
+                  hasShip ? 'game-cell-own-ship' : '',
+                  marker === 'hit' ? 'game-cell-hit' : '',
+                  marker === 'miss' ? 'game-cell-miss' : '',
+                  marker === 'sunk' ? 'game-cell-sunk' : '',
+                  isShootable ? 'game-cell-shootable' : '',
+                ].filter(Boolean).join(' ')
+
+                return (
+                  <div
+                    key={`${row.id}-${column.id}`}
+                    className={classNames}
+                    role={isShootable ? 'button' : undefined}
+                    tabIndex={isShootable ? 0 : undefined}
+                    title={isShootable ? `${row.label} – ${column.label}` : undefined}
+                    onClick={isShootable ? () => onCellClick(rowIndex, colIndex) : undefined}
+                    onKeyDown={isShootable ? (e) => { if (e.key === 'Enter' || e.key === ' ') onCellClick(rowIndex, colIndex) } : undefined}
+                  >
+                    {marker === 'hit' && <span className="game-marker game-marker-hit" aria-hidden="true">🔥</span>}
+                    {marker === 'miss' && <span className="game-marker game-marker-miss" aria-hidden="true">•</span>}
+                    {marker === 'sunk' && <span className="game-marker game-marker-sunk" aria-hidden="true">✕</span>}
+                  </div>
+                )
+              })}
+            </Fragment>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [playerName, setPlayerName] = useState('')
   const [joinRoomId, setJoinRoomId] = useState('')
@@ -298,6 +373,41 @@ function App() {
   const allShipsPlaced = ships.every((ship) => isPlaced(ship))
   const myPlayer = roomState?.players?.find((player) => player.id === getSocket().id)
 
+  const game = roomState?.game ?? null
+  const myId = getSocket().id
+  const isMyTurn = game?.currentTurnPlayerId === myId
+
+  const myShotsMap = useMemo(() => {
+    const map = {}
+    if (!game?.shots) return map
+    for (const shot of game.shots) {
+      if (shot.shooterId !== myId) continue
+      map[`${shot.row}-${shot.col}`] = shot.result
+      if (shot.result === 'sunk' && shot.sunkShipCells) {
+        for (const cell of shot.sunkShipCells) {
+          map[`${cell.row}-${cell.col}`] = 'sunk'
+        }
+      }
+    }
+    return map
+  }, [game?.shots, myId])
+
+  const opponentShotsMap = useMemo(() => {
+    const map = {}
+    if (!game?.shots) return map
+    for (const shot of game.shots) {
+      if (shot.shooterId === myId) continue
+      map[`${shot.row}-${shot.col}`] = shot.result
+    }
+    return map
+  }, [game?.shots, myId])
+
+  const opponentShipsForReview = useMemo(() => {
+    if (game?.phase !== 'finished' || !game?.boardByPlayerId) return null
+    const opponentId = roomState?.players?.find((p) => p.id !== myId)?.id
+    return opponentId ? game.boardByPlayerId[opponentId] : null
+  }, [game, myId, roomState])
+
   const inviteUrl = useMemo(() => {
     if (!roomState?.roomId) {
       return ''
@@ -327,9 +437,11 @@ function App() {
     setShips(makeShipPool())
     const socket = getSocket()
     socket.off('room:state')
-    socket.on('room:state', (nextState) => {
-      setRoomState(nextState)
-    })
+    socket.off('game:started')
+    socket.off('game:state')
+    socket.on('room:state', (nextState) => { setRoomState(nextState) })
+    socket.on('game:started', (nextState) => { setRoomState(nextState) })
+    socket.on('game:state', (nextState) => { setRoomState(nextState) })
   }
 
   async function joinRoom() {
@@ -348,9 +460,11 @@ function App() {
     setShips(makeShipPool())
     const socket = getSocket()
     socket.off('room:state')
-    socket.on('room:state', (nextState) => {
-      setRoomState(nextState)
-    })
+    socket.off('game:started')
+    socket.off('game:state')
+    socket.on('room:state', (nextState) => { setRoomState(nextState) })
+    socket.on('game:started', (nextState) => { setRoomState(nextState) })
+    socket.on('game:state', (nextState) => { setRoomState(nextState) })
   }
 
   function fillFromUrlRoom() {
@@ -481,9 +595,20 @@ function App() {
       return
     }
 
+    const shipsPayload = ready
+      ? ships.filter(isPlaced).map((ship) => ({
+          id: ship.id,
+          row: ship.row,
+          col: ship.col,
+          size: ship.size,
+          orientation: ship.orientation,
+        }))
+      : undefined
+
     const response = await withCallback('room:setReady', {
       roomId: roomState.roomId,
       ready,
+      ships: shipsPayload,
     })
 
     if (!response?.ok) {
@@ -494,6 +619,33 @@ function App() {
     setRoomState(response.room)
   }
 
+  async function shoot(row, col) {
+    if (!roomState?.roomId) return
+
+    const rowLabel = boardConfig.rows[row]?.label
+    const colLabel = boardConfig.columns[col]?.label
+    if (rowLabel && colLabel) speakWord(`${rowLabel} ${colLabel}`)
+
+    const response = await withCallback('game:shoot', { roomId: roomState.roomId, row, col })
+    if (!response?.ok) return
+
+    setRoomState(response.room)
+
+    const updatedGame = response.room?.game
+    const lastShot = updatedGame?.shots
+      ? [...updatedGame.shots].reverse().find((s) => s.shooterId === myId)
+      : null
+
+    if (lastShot?.result === 'sunk') speakWord('Trafiony zatopiony')
+    else if (lastShot?.result === 'hit') speakWord('Trafiony')
+    else if (lastShot?.result === 'miss') speakWord('Pudło')
+
+    if (updatedGame?.winnerPlayerId) {
+      if (updatedGame.winnerPlayerId === myId) speakWord('Wygrałeś')
+      else speakWord('Przegrałeś')
+    }
+  }
+
   return (
     <div className="app-shell">
       <section className="container py-4 py-md-5">
@@ -502,192 +654,258 @@ function App() {
             <div className="hero-card p-4 p-md-5 mb-4">
               <h1 className="display-6 mb-2">Logopedyczne Statki</h1>
               <p className="lead mb-0">
-                Etap 1: tworzenie i dołączanie do pokoju + plansza słów i ikon z odsłuchem.
+                {game?.phase === 'playing' && (isMyTurn ? '👉 Twoja tura — wybierz cel na planszy przeciwnika!' : '⏳ Czekaj — tura przeciwnika...')}
+                {game?.phase === 'finished' && (game.winnerPlayerId === myId ? '🎉 Wygrałeś! Gratulacje!' : '😢 Tym razem przegrałeś. Może następnym razem!')}
+                {(!game || game.phase === 'waiting') && 'Ustaw statki i zaproś przyjaciela do gry!'}
               </p>
             </div>
           </div>
         </div>
 
-        <div className="row g-4 justify-content-center">
-          <div className="col-12 col-lg-5">
-            <div className="panel p-4 h-100">
-              <h2 className="h4 mb-3">Pokój gry</h2>
-              <div className="mb-3">
-                <label className="form-label">Imię gracza</label>
-                <input
-                  className="form-control"
-                  value={playerName}
-                  onChange={(event) => setPlayerName(event.target.value)}
-                  placeholder="Np. Tata"
+        {/* ── GAME PHASE ─────────────────────────────────────────────── */}
+        {(game?.phase === 'playing' || game?.phase === 'finished') && (
+          <div className="row g-4 justify-content-center">
+            <div className="col-12 col-lg-6">
+              <div className="panel p-4 h-100">
+                <h2 className="h5 mb-3">
+                  🛡️ Twoja flota
+                  <span className="ms-2 small text-muted fw-normal">
+                    ({roomState?.players?.find((p) => p.id === myId)?.name ?? 'Ja'})
+                  </span>
+                </h2>
+                <StaticGameBoard
+                  ships={ships}
+                  shotMarkers={opponentShotsMap}
+                  isClickable={false}
+                  myTurn={false}
+                  onCellClick={null}
                 />
               </div>
+            </div>
 
-              <div className="d-grid gap-2 mb-3">
-                <button type="button" className="btn btn-primary" onClick={createRoom}>
-                  Utwórz pokój
-                </button>
-              </div>
-
-              <div className="input-group mb-2">
-                <input
-                  className="form-control"
-                  value={joinRoomId}
-                  onChange={(event) => setJoinRoomId(event.target.value)}
-                  placeholder="Kod pokoju"
+            <div className="col-12 col-lg-6">
+              <div className="panel p-4 h-100">
+                <h2 className="h5 mb-3">
+                  🎯 Wody przeciwnika
+                  <span className="ms-2 small text-muted fw-normal">
+                    ({roomState?.players?.find((p) => p.id !== myId)?.name ?? 'Przeciwnik'})
+                  </span>
+                </h2>
+                {game.phase === 'playing' && !isMyTurn && (
+                  <div className="alert alert-warning py-2 mb-3">⏳ Tura przeciwnika...</div>
+                )}
+                {game.phase === 'playing' && isMyTurn && (
+                  <div className="alert alert-success py-2 mb-3">👆 Kliknij w komórkę, żeby strzelić!</div>
+                )}
+                <StaticGameBoard
+                  ships={opponentShipsForReview}
+                  shotMarkers={myShotsMap}
+                  isClickable={game.phase === 'playing'}
+                  myTurn={isMyTurn}
+                  onCellClick={shoot}
                 />
-                <button type="button" className="btn btn-outline-primary" onClick={joinRoom}>
-                  Dołącz
-                </button>
               </div>
+            </div>
 
-              <button type="button" className="btn btn-link px-0" onClick={fillFromUrlRoom}>
-                Wczytaj kod pokoju z linku
-              </button>
-
-              {error && <div className="alert alert-danger mt-3 mb-0">{error}</div>}
-
-              {roomState && (
-                <div className="mt-4 room-box p-3">
-                  <div className="d-flex align-items-center justify-content-between flex-wrap gap-2">
-                    <strong>{roomState.roomId}</strong>
-                    <span className={`badge ${roomState.isReady ? 'text-bg-success' : 'text-bg-warning'}`}>
-                      {roomState.isReady ? '2 graczy - gotowe' : 'Czekam na 2. gracza'}
-                    </span>
-                  </div>
-
-                  <div className="small text-muted mt-2 d-flex flex-wrap gap-2">
-                    {(roomState.players || []).map((player) => (
-                      <span key={player.id} className="badge text-bg-light border">
-                        {player.name} ({player.role === 'host' ? 'host' : 'gość'}) {player.ready ? '✅' : '⏳'}
-                      </span>
-                    ))}
-                  </div>
-
-                  <div className="input-group mt-3">
-                    <span className="input-group-text">
-                      <Link2 size={14} />
-                    </span>
-                    <input className="form-control" value={inviteUrl} readOnly />
-                    <button type="button" className="btn btn-outline-secondary" onClick={copyInviteLink}>
-                      {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
-                    </button>
-                  </div>
-
-                  <div className="mt-3 d-flex gap-2 flex-wrap">
-                    <button
-                      type="button"
-                      className="btn btn-success btn-sm"
-                      onClick={() => setReady(true)}
-                      disabled={!allShipsPlaced || !roomState.isReady}
-                    >
-                      Jestem gotowy
-                    </button>
-                    <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setReady(false)}>
-                      Cofnij gotowość
-                    </button>
-                  </div>
-                  {roomState.allPlayersReady && <div className="alert alert-success mt-3 mb-0">Obaj gracze gotowi. Kolejny etap: tury i strzały.</div>}
+            <div className="col-12">
+              <div className="panel p-3">
+                <div className="d-flex flex-wrap gap-2 justify-content-center align-items-center">
+                  <span className="small text-muted">Słowa koordynatów:</span>
+                  {boardConfig.rows.map((item) => (
+                    <CoordinateChip key={item.id} item={item} />
+                  ))}
+                  {boardConfig.columns.map((item) => (
+                    <CoordinateChip key={item.id} item={item} />
+                  ))}
                 </div>
-              )}
+              </div>
             </div>
           </div>
+        )}
 
-          <div className="col-12 col-lg-5">
-            <div className="panel p-4 h-100">
-              <h2 className="h4 mb-3">Plansza ustawiania statków ({boardConfig.boardSize}x{boardConfig.boardSize})</h2>
+        {/* ── LOBBY + SETUP PHASE ─────────────────────────────────────── */}
+        {(!game || game.phase === 'waiting') && (
+          <div className="row g-4 justify-content-center">
+            <div className="col-12 col-lg-5">
+              <div className="panel p-4 h-100">
+                <h2 className="h4 mb-3">Pokój gry</h2>
+                <div className="mb-3">
+                  <label className="form-label">Imię gracza</label>
+                  <input
+                    className="form-control"
+                    value={playerName}
+                    onChange={(event) => setPlayerName(event.target.value)}
+                    placeholder="Np. Tata"
+                  />
+                </div>
 
-              <DndContext onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleShipDrop} onDragCancel={handleDragCancel}>
-                <div className="row g-3">
-                  <div className="col-12">
-                    <div className="d-flex flex-wrap gap-2">
-                      {ships.map((ship) => (
-                        <ShipDraggable key={ship.id} ship={ship} onRotate={rotateShip} onReset={resetShip} />
+                <div className="d-grid gap-2 mb-3">
+                  <button type="button" className="btn btn-primary" onClick={createRoom}>
+                    Utwórz pokój
+                  </button>
+                </div>
+
+                <div className="input-group mb-2">
+                  <input
+                    className="form-control"
+                    value={joinRoomId}
+                    onChange={(event) => setJoinRoomId(event.target.value)}
+                    placeholder="Kod pokoju"
+                  />
+                  <button type="button" className="btn btn-outline-primary" onClick={joinRoom}>
+                    Dołącz
+                  </button>
+                </div>
+
+                <button type="button" className="btn btn-link px-0" onClick={fillFromUrlRoom}>
+                  Wczytaj kod pokoju z linku
+                </button>
+
+                {error && <div className="alert alert-danger mt-3 mb-0">{error}</div>}
+
+                {roomState && (
+                  <div className="mt-4 room-box p-3">
+                    <div className="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                      <strong>{roomState.roomId}</strong>
+                      <span className={`badge ${roomState.isReady ? 'text-bg-success' : 'text-bg-warning'}`}>
+                        {roomState.isReady ? '2 graczy - gotowe' : 'Czekam na 2. gracza'}
+                      </span>
+                    </div>
+
+                    <div className="small text-muted mt-2 d-flex flex-wrap gap-2">
+                      {(roomState.players || []).map((player) => (
+                        <span key={player.id} className="badge text-bg-light border">
+                          {player.name} ({player.role === 'host' ? 'host' : 'gość'}) {player.ready ? '✅' : '⏳'}
+                        </span>
                       ))}
                     </div>
+
+                    <div className="input-group mt-3">
+                      <span className="input-group-text">
+                        <Link2 size={14} />
+                      </span>
+                      <input className="form-control" value={inviteUrl} readOnly />
+                      <button type="button" className="btn btn-outline-secondary" onClick={copyInviteLink}>
+                        {copied ? <CheckCircle2 size={16} /> : <Copy size={16} />}
+                      </button>
+                    </div>
+
+                    <div className="mt-3 d-flex gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        className="btn btn-success btn-sm"
+                        onClick={() => setReady(true)}
+                        disabled={!allShipsPlaced || !roomState.isReady}
+                      >
+                        Jestem gotowy
+                      </button>
+                      <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setReady(false)}>
+                        Cofnij gotowość
+                      </button>
+                    </div>
+                    {roomState.allPlayersReady && <div className="alert alert-success mt-3 mb-0">Obaj gracze gotowi — trwa uruchamianie gry...</div>}
                   </div>
+                )}
+              </div>
+            </div>
 
-                  <div className="col-12">
-                    <div className="board-wrap">
-                      <div className="board-grid" style={{ gridTemplateColumns: `90px repeat(${boardConfig.boardSize}, minmax(32px, 1fr))` }}>
-                        <div className="board-corner" />
-                        {boardConfig.columns.map((column) => {
-                          const Icon = icons[column.icon] || icons.Square
-                          return (
-                            <button
-                              key={column.id}
-                              type="button"
-                              className="board-axis"
-                              title={column.label}
-                              onClick={() => speakWord(column.label)}
-                            >
-                              <Icon size={16} />
-                            </button>
-                          )
-                        })}
+            <div className="col-12 col-lg-5">
+              <div className="panel p-4 h-100">
+                <h2 className="h4 mb-3">Plansza ustawiania statków ({boardConfig.boardSize}x{boardConfig.boardSize})</h2>
 
-                        {boardConfig.rows.map((row, rowIndex) => {
-                          const Icon = icons[row.icon] || icons.Square
-                          return (
-                            <Fragment key={row.id}>
+                <DndContext onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleShipDrop} onDragCancel={handleDragCancel}>
+                  <div className="row g-3">
+                    <div className="col-12">
+                      <div className="d-flex flex-wrap gap-2">
+                        {ships.map((ship) => (
+                          <ShipDraggable key={ship.id} ship={ship} onRotate={rotateShip} onReset={resetShip} />
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="col-12">
+                      <div className="board-wrap">
+                        <div className="board-grid" style={{ gridTemplateColumns: `90px repeat(${boardConfig.boardSize}, minmax(32px, 1fr))` }}>
+                          <div className="board-corner" />
+                          {boardConfig.columns.map((column) => {
+                            const Icon = icons[column.icon] || icons.Square
+                            return (
                               <button
-                                key={`${row.id}-axis`}
+                                key={column.id}
                                 type="button"
                                 className="board-axis"
-                                title={row.label}
-                                onClick={() => speakWord(row.label)}
+                                title={column.label}
+                                onClick={() => speakWord(column.label)}
                               >
                                 <Icon size={16} />
                               </button>
-                              {boardConfig.columns.map((column, colIndex) => {
-                                const cellKey = `${rowIndex}-${colIndex}`
-                                const shipInfo = cellToShipInfo(cellKey, ships)
-                                const inPreview = placementPreview.active && placementPreview.cells.includes(cellKey)
-                                const previewStatus = inPreview ? (placementPreview.isValid ? 'valid' : 'invalid') : null
-                                const previewSegmentClass = inPreview ? getPreviewSegmentClass(cellKey, placementPreview.cells) : ''
-                                return (
-                                  <BoardCell key={`${row.id}-${column.id}`} id={cellKey} previewStatus={previewStatus} previewSegmentClass={previewSegmentClass}>
-                                    {shipInfo && (
-                                      shipInfo.isHead ? (
-                                        <BoardShipDraggable ship={shipInfo.ship} />
-                                      ) : (
-                                        <div className="ship-piece ship-piece-body" title={`Statek ${shipInfo.ship.size}`} />
-                                      )
-                                    )}
-                                  </BoardCell>
-                                )
-                              })}
-                            </Fragment>
-                          )
-                        })}
+                            )
+                          })}
+
+                          {boardConfig.rows.map((row, rowIndex) => {
+                            const Icon = icons[row.icon] || icons.Square
+                            return (
+                              <Fragment key={row.id}>
+                                <button
+                                  key={`${row.id}-axis`}
+                                  type="button"
+                                  className="board-axis"
+                                  title={row.label}
+                                  onClick={() => speakWord(row.label)}
+                                >
+                                  <Icon size={16} />
+                                </button>
+                                {boardConfig.columns.map((column, colIndex) => {
+                                  const cellKey = `${rowIndex}-${colIndex}`
+                                  const shipInfo = cellToShipInfo(cellKey, ships)
+                                  const inPreview = placementPreview.active && placementPreview.cells.includes(cellKey)
+                                  const previewStatus = inPreview ? (placementPreview.isValid ? 'valid' : 'invalid') : null
+                                  const previewSegmentClass = inPreview ? getPreviewSegmentClass(cellKey, placementPreview.cells) : ''
+                                  return (
+                                    <BoardCell key={`${row.id}-${column.id}`} id={cellKey} previewStatus={previewStatus} previewSegmentClass={previewSegmentClass}>
+                                      {shipInfo && (
+                                        shipInfo.isHead ? (
+                                          <BoardShipDraggable ship={shipInfo.ship} />
+                                        ) : (
+                                          <div className="ship-piece ship-piece-body" title={`Statek ${shipInfo.ship.size}`} />
+                                        )
+                                      )}
+                                    </BoardCell>
+                                  )
+                                })}
+                              </Fragment>
+                            )
+                          })}
+                        </div>
                       </div>
                     </div>
                   </div>
+                </DndContext>
+
+                {setupError && <div className="alert alert-warning mt-3 mb-0">{setupError}</div>}
+                {myPlayer?.ready && <div className="alert alert-info mt-3 mb-0">Twoja gotowość ustawiona.</div>}
+
+                <hr className="my-4" />
+
+                <h3 className="h6">Słowa koordynatów</h3>
+
+                <p className="small text-muted mb-2">Pion (wiersze)</p>
+                <div className="d-flex flex-wrap gap-2 mb-3">
+                  {boardConfig.rows.map((item) => (
+                    <CoordinateChip key={item.id} item={item} />
+                  ))}
                 </div>
-              </DndContext>
 
-              {setupError && <div className="alert alert-warning mt-3 mb-0">{setupError}</div>}
-              {myPlayer?.ready && <div className="alert alert-info mt-3 mb-0">Twoja gotowość ustawiona.</div>}
-
-              <hr className="my-4" />
-
-              <h3 className="h6">Słowa koordynatów</h3>
-
-              <p className="small text-muted mb-2">Pion (wiersze)</p>
-              <div className="d-flex flex-wrap gap-2 mb-3">
-                {boardConfig.rows.map((item) => (
-                  <CoordinateChip key={item.id} item={item} />
-                ))}
-              </div>
-
-              <p className="small text-muted mb-2">Poziom (kolumny)</p>
-              <div className="d-flex flex-wrap gap-2">
-                {boardConfig.columns.map((item) => (
-                  <CoordinateChip key={item.id} item={item} />
-                ))}
+                <p className="small text-muted mb-2">Poziom (kolumny)</p>
+                <div className="d-flex flex-wrap gap-2">
+                  {boardConfig.columns.map((item) => (
+                    <CoordinateChip key={item.id} item={item} />
+                  ))}
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        )}
       </section>
     </div>
   )

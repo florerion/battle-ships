@@ -159,6 +159,52 @@
   opacity: 0.9;
 }
 
+/* ── Game phase cell styles ─────────────────────────────────────────── */
+
+.game-cell-own-ship {
+  background: linear-gradient(145deg, #cfe2ff 0%, #9ec5fe 100%);
+  border-color: #6ea8fe;
+}
+
+.game-cell-hit {
+  background-color: #f8d7da;
+  border-color: #f1aeb5;
+}
+
+.game-cell-sunk {
+  background-color: #842029;
+  border-color: #58151c;
+}
+
+.game-cell-miss {
+  background-color: #e9ecef;
+  border-color: #adb5bd;
+}
+
+.game-cell-shootable {
+  cursor: crosshair;
+  transition: background-color 0.1s, border-color 0.1s;
+}
+
+.game-cell-shootable:hover,
+.game-cell-shootable:focus {
+  background-color: #fff3cd;
+  border-color: #ffc107;
+  outline: none;
+}
+
+.game-marker {
+  font-size: 1.1rem;
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+
+.game-marker-sunk {
+  color: #ffffff;
+  font-style: normal;
+}
+
 @media (max-width: 767px) {
   .hero-card,
   .panel {
