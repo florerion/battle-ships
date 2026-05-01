@@ -9,6 +9,81 @@ import './App.css'
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001'
 const BOARD_CELL_SIZE = 38
+const MIN_BOARD_SIZE = 6
+const FLEET_SLOT_RESERVE = 4
+const FLEET_FEASIBILITY_CHECKS = 3
+const FAST_MAX_FEASIBILITY_CHECKS = 1
+const FAST_MAX_PLACE_RETRIES = 8
+const FAST_MAX_PLACE_ATTEMPTS = 80
+
+function buildCoordinateWordPool(config) {
+  const fromWords = Array.isArray(config.words) ? config.words : []
+  const fromLegacyAxes = [...(Array.isArray(config.rows) ? config.rows : []), ...(Array.isArray(config.columns) ? config.columns : [])]
+  const raw = fromWords.length > 0 ? fromWords : fromLegacyAxes
+
+  return raw.filter((item, index, all) => {
+    const id = String(item?.id ?? '').trim()
+    if (!id) return false
+    return all.findIndex((candidate) => String(candidate?.id ?? '').trim() === id) === index
+  })
+}
+
+const COORDINATE_WORD_POOL = buildCoordinateWordPool(boardConfig)
+
+const DEFAULT_SETTINGS = {
+  boardSize: boardConfig.boardSize,
+  ships: boardConfig.ships.map((group) => ({ size: group.size, count: group.count })),
+}
+
+const GAME_PRESETS = {
+  easy: {
+    label: 'Łatwy',
+    boardSize: Math.max(MIN_BOARD_SIZE, DEFAULT_SETTINGS.boardSize - 1),
+    countFactor: 0.8,
+    smallShipBonus: 0,
+  },
+  medium: {
+    label: 'Średni',
+    boardSize: DEFAULT_SETTINGS.boardSize,
+    countFactor: 1,
+    smallShipBonus: 0,
+  },
+  hard: {
+    label: 'Trudny',
+    boardSize: DEFAULT_SETTINGS.boardSize + 2,
+    countFactor: 1.25,
+    smallShipBonus: 1,
+  },
+  ultra: {
+    label: 'Ultra',
+    boardSize: 999,
+    maximize: true,
+  },
+}
+
+function buildShipsForPreset(preset) {
+  return DEFAULT_SETTINGS.ships.map((group) => {
+    const baseCount = Math.max(1, Math.round(group.count * preset.countFactor))
+    const boostedCount = group.size <= 2 ? baseCount + preset.smallShipBonus : baseCount
+    return { size: group.size, count: boostedCount }
+  })
+}
+
+function normalizeShipsForCompare(ships) {
+  return (Array.isArray(ships) ? ships : [])
+    .map((ship) => ({ size: Number(ship?.size), count: Number(ship?.count) }))
+    .filter((ship) => Number.isInteger(ship.size) && Number.isInteger(ship.count) && ship.size > 0 && ship.count > 0)
+    .sort((a, b) => b.size - a.size)
+}
+
+function areShipConfigsEqual(a, b) {
+  const left = normalizeShipsForCompare(a)
+  const right = normalizeShipsForCompare(b)
+  if (left.length !== right.length) {
+    return false
+  }
+  return left.every((ship, index) => ship.size === right[index].size && ship.count === right[index].count)
+}
 
 let socketSingleton = null
 
@@ -38,11 +113,209 @@ function CoordinateChip({ item }) {
   )
 }
 
-function makeShipPool() {
+function normalizeShipGroups(groups, boardSize) {
+  return (Array.isArray(groups) ? groups : [])
+    .map((group) => ({
+      size: Number(group?.size),
+      count: Number(group?.count),
+    }))
+    .filter((group) => Number.isInteger(group.size) && Number.isInteger(group.count) && group.size > 0 && group.count > 0 && group.size <= boardSize)
+}
+
+// Budżet planszy: liczba "slotów" dostępnych dla wszystkich statków łącznie.
+// Każdy statek rozmiaru S zajmuje (S+1) slotów (statek + 1 odstęp).
+// Rzędy ze statkami: co drugi rząd → floor((N+1)/2) rzędów.
+// Szerokość w slotach: (N+1) na rząd.
+function fleetBudget(boardSize) {
+  const rawBudget = (boardSize + 1) * Math.floor((boardSize + 1) / 2)
+  return Math.max(0, rawBudget - FLEET_SLOT_RESERVE)
+}
+
+function fleetCost(ships) {
+  return ships.reduce((sum, s) => sum + (s.size + 1) * s.count, 0)
+}
+
+function canAutoPlaceFleet(boardSize, shipGroups, options = {}) {
+  const checks = Number.isInteger(options.checks) ? options.checks : FLEET_FEASIBILITY_CHECKS
+  const retries = Number.isInteger(options.retries) ? options.retries : 30
+  const attemptsPerShip = Number.isInteger(options.attemptsPerShip) ? options.attemptsPerShip : 400
+
+  for (let i = 0; i < checks; i += 1) {
+    const shipPool = makeShipPool(shipGroups)
+    if (autoPlaceShips(shipPool, boardSize, { retries, attemptsPerShip })) {
+      return true
+    }
+  }
+  return false
+}
+
+// Maksymalna ilość dla danego typu przy zachowaniu aktualnych ilości pozostałych typów.
+function computeMaxShipCountForType(boardSize, targetIndex, ships) {
+  const budget = fleetBudget(boardSize)
+  const usedByOthers = ships.reduce((sum, s, i) => (i === targetIndex ? sum : sum + (s.size + 1) * s.count), 0)
+  const remaining = budget - usedByOthers
+  const cost = (ships[targetIndex]?.size ?? 1) + 1
+  return Math.max(1, Math.floor(remaining / cost))
+}
+
+function clipShipsByBudget(boardSize, ships) {
+  const budget = fleetBudget(boardSize)
+  const clipped = ships.map((s) => ({ ...s }))
+
+  if (fleetCost(clipped) > budget) {
+    let excess = fleetCost(clipped) - budget
+    const order = clipped.map((_, i) => i).sort((a, b) => clipped[b].size - clipped[a].size)
+    for (const idx of order) {
+      if (excess <= 0) break
+      const costPerShip = clipped[idx].size + 1
+      const canReduce = clipped[idx].count - 1
+      const reduceBy = Math.min(canReduce, Math.ceil(excess / costPerShip))
+      if (reduceBy > 0) {
+        clipped[idx].count -= reduceBy
+        excess -= reduceBy * costPerShip
+      }
+    }
+  }
+
+  return clipped
+}
+
+function clipShipsToCapacity(boardSize, ships) {
+  const clipped = clipShipsByBudget(boardSize, ships)
+
+  // Dodatkowa walidacja wykonalności: jeśli losowe układanie nadal nie daje rady,
+  // zmniejszamy flotę po 1 sztuce od największych statków, aż przejdzie.
+  let guard = 200
+  while (guard > 0 && !canAutoPlaceFleet(boardSize, clipped)) {
+    const reducibleIndex = clipped
+      .map((group, index) => ({ ...group, index }))
+      .filter((group) => group.count > 1)
+      .sort((a, b) => (b.size - a.size) || (b.count - a.count))[0]?.index
+
+    if (reducibleIndex === undefined) {
+      break
+    }
+
+    clipped[reducibleIndex] = {
+      ...clipped[reducibleIndex],
+      count: clipped[reducibleIndex].count - 1,
+    }
+    guard -= 1
+  }
+
+  const warnings = ships
+    .map((orig, i) => (clipped[i].count < orig.count ? { size: orig.size, from: orig.count, to: clipped[i].count } : null))
+    .filter(Boolean)
+
+  return { ships: clipped, warnings }
+}
+
+function hasSameShipCounts(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
+    return false
+  }
+  return a.every((ship, index) => ship.count === b[index].count)
+}
+
+function shipCountsSignature(boardSize, ships) {
+  return `${boardSize}|${ships.map((ship) => `${ship.size}:${ship.count}`).join('|')}`
+}
+
+function computeTrueMaxCountForType(boardSize, targetIndex, ships, feasibilityCache) {
+  const current = Array.isArray(ships) ? ships : []
+  const target = current[targetIndex]
+  if (!target) {
+    return 1
+  }
+
+  const budgetMax = Math.max(1, computeMaxShipCountForType(boardSize, targetIndex, current))
+  let left = 1
+  let right = budgetMax
+  let best = 1
+
+  function isCandidateValid(candidateCount) {
+    const candidateShips = current.map((ship, index) =>
+      index === targetIndex ? { ...ship, count: candidateCount } : { ...ship },
+    )
+
+    // Szybki filtr: jeżeli już na samym budżecie jest obcięcie, odpada.
+    const budgetClipped = clipShipsByBudget(boardSize, candidateShips)
+    if (!hasSameShipCounts(budgetClipped, candidateShips)) {
+      return false
+    }
+
+    const cacheKey = shipCountsSignature(boardSize, candidateShips)
+    if (feasibilityCache?.has(cacheKey)) {
+      return feasibilityCache.get(cacheKey)
+    }
+
+    // Lżejszy test wykonalności do UI (mniej prób niż pełny walidator).
+    const feasible = canAutoPlaceFleet(boardSize, candidateShips, {
+      checks: FAST_MAX_FEASIBILITY_CHECKS,
+      retries: FAST_MAX_PLACE_RETRIES,
+      attemptsPerShip: FAST_MAX_PLACE_ATTEMPTS,
+    })
+    feasibilityCache?.set(cacheKey, feasible)
+    return feasible
+  }
+
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2)
+    if (isCandidateValid(mid)) {
+      best = mid
+      left = mid + 1
+    } else {
+      right = mid - 1
+    }
+  }
+
+  return best
+}
+
+function computeTrueMaxCounts(boardSize, ships, feasibilityCache) {
+  return ships.map((_, index) => computeTrueMaxCountForType(boardSize, index, ships, feasibilityCache))
+}
+
+// Skaluje proporcjonalnie domyślny skład floty przez maksymalny czynnik K,
+// zachowując zasadę „im mniejszy statek, tym więcej sztuk" (stosunek z DEFAULT_SETTINGS).
+function computeMaximizedFleet(boardSize, shipGroups) {
+  const base = normalizeShipGroups(DEFAULT_SETTINGS.ships, boardSize)
+  if (base.length === 0) return shipGroups
+
+  const baseCost = fleetCost(base)
+  const budget = fleetBudget(boardSize)
+  const maxK = baseCost > 0 ? Math.max(1, Math.floor(budget / baseCost)) : 1
+
+  for (let k = maxK; k >= 1; k -= 1) {
+    const scaled = base.map((g) => ({ ...g, count: g.count * k }))
+    if (canAutoPlaceFleet(boardSize, scaled, { checks: 2, retries: 15, attemptsPerShip: 200 })) {
+      return scaled
+    }
+  }
+
+  return base
+}
+
+function shuffleArray(items) {
+  const copy = [...items]
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const temp = copy[i]
+    copy[i] = copy[j]
+    copy[j] = temp
+  }
+  return copy
+}
+
+function pickRandomCoordinates(pool, count) {
+  return shuffleArray(pool).slice(0, count)
+}
+
+function makeShipPool(shipGroups) {
   const ships = []
   let index = 1
 
-  boardConfig.ships.forEach((group) => {
+  shipGroups.forEach((group) => {
     for (let i = 0; i < group.count; i += 1) {
       ships.push({
         id: `ship-${index}`,
@@ -56,6 +329,16 @@ function makeShipPool() {
   })
 
   return ships
+}
+
+function buildRandomAxes(boardSize) {
+  const maxUniqueBoardSize = Math.floor(COORDINATE_WORD_POOL.length / 2)
+  const safeBoardSize = Math.min(boardSize, maxUniqueBoardSize)
+  const picked = pickRandomCoordinates(COORDINATE_WORD_POOL, safeBoardSize * 2)
+  return {
+    rows: picked.slice(0, safeBoardSize),
+    columns: picked.slice(safeBoardSize, safeBoardSize * 2),
+  }
 }
 
 function isPlaced(ship) {
@@ -303,8 +586,7 @@ function ShipDragGhost({ ship }) {
   )
 }
 
-function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick, lastShotCell }) {
-  const boardSize = boardConfig.boardSize
+function StaticGameBoard({ boardSize, rows, columns, ships, shotMarkers, isClickable, myTurn, onCellClick, lastShotCell }) {
   const [hoveredCellTooltip, setHoveredCellTooltip] = useState(null)
 
   function showCellTooltip(event, label) {
@@ -350,7 +632,7 @@ function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick,
     <div className="board-wrap">
       <div className="board-grid" style={{ gridTemplateColumns: `90px repeat(${boardSize}, minmax(32px, 1fr))` }}>
         <div className="board-corner" />
-        {boardConfig.columns.map((column) => {
+        {columns.map((column) => {
           const Icon = icons[column.icon] || icons.Square
           return (
             <button key={column.id} type="button" className="board-axis" title={column.label} onClick={() => speakWord(column.label)}>
@@ -359,14 +641,14 @@ function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick,
           )
         })}
 
-        {boardConfig.rows.map((row, rowIndex) => {
+        {rows.map((row, rowIndex) => {
           const RowIcon = icons[row.icon] || icons.Square
           return (
             <Fragment key={row.id}>
               <button key={`${row.id}-axis`} type="button" className="board-axis" title={row.label} onClick={() => speakWord(row.label)}>
                 <RowIcon size={16} />
               </button>
-              {boardConfig.columns.map((column, colIndex) => {
+              {columns.map((column, colIndex) => {
                 const cellKey = `${rowIndex}-${colIndex}`
                 const hasShip = Boolean(shipCellsMap[cellKey])
                 const marker = shotMarkers?.[cellKey]
@@ -419,15 +701,18 @@ function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick,
   )
 }
 
-function autoPlaceShips(shipPool, boardSize) {
-  for (let retry = 0; retry < 30; retry += 1) {
+function autoPlaceShips(shipPool, boardSize, options = {}) {
+  const retries = Number.isInteger(options.retries) ? options.retries : 30
+  const attemptsPerShip = Number.isInteger(options.attemptsPerShip) ? options.attemptsPerShip : 400
+
+  for (let retry = 0; retry < retries; retry += 1) {
     const newShips = shipPool.map((s) => ({ ...s, row: null, col: null, orientation: 'horizontal' }))
     let failed = false
 
     for (let i = 0; i < newShips.length; i += 1) {
       let placed = false
 
-      for (let attempt = 0; attempt < 400; attempt += 1) {
+      for (let attempt = 0; attempt < attemptsPerShip; attempt += 1) {
         const orientation = Math.random() < 0.5 ? 'horizontal' : 'vertical'
         const maxRow = orientation === 'vertical' ? boardSize - newShips[i].size : boardSize - 1
         const maxCol = orientation === 'horizontal' ? boardSize - newShips[i].size : boardSize - 1
@@ -452,20 +737,26 @@ function autoPlaceShips(shipPool, boardSize) {
 }
 
 function App() {
+  const maxBoardSize = Math.floor(COORDINATE_WORD_POOL.length / 2)
   const [playerName, setPlayerName] = useState('')
   const [joinRoomId, setJoinRoomId] = useState('')
   const [roomState, setRoomState] = useState(null)
   const [error, setError] = useState('')
   const [connectionState, setConnectionState] = useState(() => (getSocket().connected ? 'connected' : 'disconnected'))
   const [copied, setCopied] = useState(false)
-  const [ships, setShips] = useState(() => makeShipPool())
+  const [settingsDraft, setSettingsDraft] = useState(() => ({ ...DEFAULT_SETTINGS }))
+  const [capacityWarnings, setCapacityWarnings] = useState([])
+  const [draftAxes, setDraftAxes] = useState(() => buildRandomAxes(DEFAULT_SETTINGS.boardSize))
+  const [ships, setShips] = useState(() => makeShipPool(DEFAULT_SETTINGS.ships))
   const [setupError, setSetupError] = useState('')
   const [gameError, setGameError] = useState('')
   const [showHowToPlay, setShowHowToPlay] = useState(false)
+  const [showSettingsModal, setShowSettingsModal] = useState(false)
   const [dragState, setDragState] = useState({ shipId: null, overCellId: null })
   const [selectedShipId, setSelectedShipId] = useState(null)
   const [dropPulseShipId, setDropPulseShipId] = useState(null)
   const dropPulseTimeoutRef = useRef(null)
+  const maxFeasibilityCacheRef = useRef(new Map())
 
   useEffect(() => {
     return () => {
@@ -476,13 +767,14 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!showHowToPlay) {
+    if (!showHowToPlay && !showSettingsModal) {
       return undefined
     }
 
     function handleEsc(event) {
       if (event.key === 'Escape') {
         setShowHowToPlay(false)
+        setShowSettingsModal(false)
       }
     }
 
@@ -493,10 +785,66 @@ function App() {
       document.body.style.overflow = ''
       window.removeEventListener('keydown', handleEsc)
     }
-  }, [showHowToPlay])
+  }, [showHowToPlay, showSettingsModal])
+
+  useEffect(() => {
+    if (roomState) {
+      setShowSettingsModal(false)
+    }
+  }, [roomState])
 
   const occupiedMap = useMemo(() => buildOccupiedMap(ships), [ships])
   const trimmedPlayerName = playerName.trim()
+  const draftShipMaxCounts = useMemo(
+    () => computeTrueMaxCounts(settingsDraft.boardSize, settingsDraft.ships, maxFeasibilityCacheRef.current),
+    [settingsDraft.boardSize, settingsDraft.ships],
+  )
+  const resolvedPresetConfigs = useMemo(() => {
+    const cache = new Map()
+    return Object.fromEntries(
+      Object.entries(GAME_PRESETS).map(([presetId, preset]) => {
+        const boardSize = Math.max(MIN_BOARD_SIZE, Math.min(maxBoardSize, preset.boardSize))
+        if (preset.maximize) {
+          const baseGroups = normalizeShipGroups(DEFAULT_SETTINGS.ships.map((g) => ({ ...g })), boardSize)
+          const ships = computeMaximizedFleet(boardSize, baseGroups)
+          return [presetId, { boardSize, ships, warnings: [] }]
+        }
+        const normalized = normalizeShipGroups(buildShipsForPreset(preset), boardSize)
+        const { ships: clipped, warnings } = clipShipsToCapacity(boardSize, normalized)
+        return [presetId, { boardSize, ships: clipped, warnings }]
+      }),
+    )
+  }, [maxBoardSize])
+  const selectedPresetId = useMemo(() => {
+    return Object.entries(resolvedPresetConfigs).find(([, presetConfig]) => {
+      if (!presetConfig) {
+        return false
+      }
+      return settingsDraft.boardSize === presetConfig.boardSize && areShipConfigsEqual(settingsDraft.ships, presetConfig.ships)
+    })?.[0] ?? null
+  }, [resolvedPresetConfigs, settingsDraft.boardSize, settingsDraft.ships])
+
+  const activeSettings = {
+    boardSize: roomState?.settings?.boardSize ?? settingsDraft.boardSize,
+    ships: roomState?.settings?.ships ?? settingsDraft.ships,
+    rows: roomState?.settings?.rows ?? draftAxes.rows,
+    columns: roomState?.settings?.columns ?? draftAxes.columns,
+  }
+
+  const activeBoardSize = activeSettings.boardSize
+  const activeShipsConfig = activeSettings.ships
+  const activeRows = activeSettings.rows
+  const activeColumns = activeSettings.columns
+
+  useEffect(() => {
+    if (roomState) {
+      return
+    }
+    setDraftAxes(buildRandomAxes(settingsDraft.boardSize))
+    setShips(makeShipPool(settingsDraft.ships))
+    setSelectedShipId(null)
+    setSetupError('')
+  }, [roomState, settingsDraft.boardSize, settingsDraft.ships])
 
   const placementPreview = useMemo(() => {
     if (!dragState.shipId || !dragState.overCellId) {
@@ -525,9 +873,9 @@ function App() {
     return {
       active: true,
       cells,
-      isValid: canPlaceShip(ship, startRow, startCol, occupiedMap, boardConfig.boardSize),
+      isValid: canPlaceShip(ship, startRow, startCol, occupiedMap, activeBoardSize),
     }
-  }, [dragState, ships, occupiedMap])
+  }, [dragState, ships, occupiedMap, activeBoardSize])
 
   const activeDraggedShip = useMemo(() => {
     if (!dragState.shipId) return null
@@ -596,7 +944,7 @@ function App() {
   }, [game?.shots, myId])
 
   const opponentFleetStats = useMemo(() => {
-    const totalShips = boardConfig.ships.reduce((sum, group) => sum + group.count, 0)
+    const totalShips = activeShipsConfig.reduce((sum, group) => sum + group.count, 0)
     const myShots = game?.shots?.filter((s) => s.shooterId === myId) ?? []
     const sunk = myShots.filter((s) => s.result === 'sunk').length
     const sunkCells = new Set()
@@ -607,7 +955,7 @@ function App() {
     })
     const hitCells = myShots.filter((s) => s.result === 'hit' && !sunkCells.has(`${s.row}-${s.col}`)).length
     return { totalShips, sunk, hitCells, remaining: totalShips - sunk }
-  }, [game?.shots, myId])
+  }, [game?.shots, myId, activeShipsConfig])
 
   const inviteUrl = useMemo(() => {
     if (!roomState?.roomId) {
@@ -645,7 +993,7 @@ function App() {
     socket.on('room:state', (nextState) => {
       setRoomState((prev) => {
         if (prev?.game?.phase === 'finished' && nextState?.game?.phase === 'waiting') {
-          setShips(makeShipPool())
+          setShips(makeShipPool(nextState?.settings?.ships ?? activeShipsConfig))
           setSetupError('')
         }
         return nextState
@@ -677,6 +1025,7 @@ function App() {
       }
 
       setRoomState(response.room)
+      setShips(makeShipPool(response.room?.settings?.ships ?? activeShipsConfig))
       setError('')
     }
 
@@ -691,7 +1040,62 @@ function App() {
       socket.off('connect', handleConnect)
       socket.off('disconnect', handleDisconnect)
     }
-  }, [roomState?.roomId, trimmedPlayerName])
+  }, [roomState?.roomId, trimmedPlayerName, activeShipsConfig])
+
+  function updateDraftBoardSize(nextSize) {
+    const normalized = normalizeShipGroups(settingsDraft.ships, nextSize)
+    const { ships: clipped, warnings } = clipShipsToCapacity(nextSize, normalized)
+    setCapacityWarnings(warnings)
+    setSettingsDraft((prev) => ({ ...prev, boardSize: nextSize, ships: clipped }))
+  }
+
+  function applyDraftPreset(presetId) {
+    const resolved = resolvedPresetConfigs[presetId]
+    if (!resolved) {
+      return
+    }
+
+    setCapacityWarnings([])
+    setSettingsDraft((prev) => ({
+      ...prev,
+      boardSize: resolved.boardSize,
+      ships: resolved.ships.map((ship) => ({ ...ship })),
+    }))
+    setDraftAxes(buildRandomAxes(resolved.boardSize))
+  }
+
+  function updateDraftShip(index, field, value) {
+    const maxForType = Math.max(
+      settingsDraft.ships[index]?.count ?? 1,
+      draftShipMaxCounts[index] ?? 1,
+    )
+    const numericValue = Math.max(1, Number(value) || 1)
+    const safeValue = field === 'count' ? Math.min(maxForType, numericValue) : numericValue
+    const newShips = settingsDraft.ships.map((shipGroup, shipIndex) =>
+      shipIndex === index ? { ...shipGroup, [field]: safeValue } : shipGroup,
+    )
+    const { ships: clipped, warnings } = clipShipsToCapacity(settingsDraft.boardSize, newShips)
+    setCapacityWarnings(warnings)
+    setSettingsDraft((prev) => ({ ...prev, ships: clipped }))
+  }
+
+  function addDraftShipType() {
+    setSettingsDraft((prev) => ({
+      ...prev,
+      ships: [...prev.ships, { size: 1, count: 1 }],
+    }))
+  }
+
+  function removeDraftShipType(index) {
+    setSettingsDraft((prev) => ({
+      ...prev,
+      ships: prev.ships.filter((_, shipIndex) => shipIndex !== index),
+    }))
+  }
+
+  function rerollDraftAxes() {
+    setDraftAxes(buildRandomAxes(settingsDraft.boardSize))
+  }
 
   async function createRoom() {
     setError('')
@@ -699,14 +1103,46 @@ function App() {
       setError('Wpisz swoje imię gracza, aby utworzyć pokój.')
       return
     }
-    const response = await withCallback('room:create', { playerName })
+
+    const boardSize = Math.max(MIN_BOARD_SIZE, Math.min(maxBoardSize, Number(settingsDraft.boardSize) || DEFAULT_SETTINGS.boardSize))
+    const normalizedShips = normalizeShipGroups(settingsDraft.ships, boardSize)
+    if (!normalizedShips.length) {
+      setError('Dodaj co najmniej jeden typ statku i ustaw poprawne wartości.')
+      return
+    }
+
+    const hasTooLargeShip = normalizedShips.some((group) => group.size > boardSize)
+    if (hasTooLargeShip) {
+      setError('Rozmiar statku nie może być większy niż wielkość planszy.')
+      return
+    }
+
+    const axes =
+      draftAxes.rows.length === boardSize && draftAxes.columns.length === boardSize
+        ? draftAxes
+        : buildRandomAxes(boardSize)
+
+    if (axes.rows.length !== boardSize || axes.columns.length !== boardSize) {
+      setError('Brak wystarczającej liczby unikalnych słów do wybranego rozmiaru planszy. Zmniejsz planszę.')
+      return
+    }
+
+    const response = await withCallback('room:create', {
+      playerName,
+      settings: {
+        boardSize,
+        ships: normalizedShips,
+        rows: axes.rows,
+        columns: axes.columns,
+      },
+    })
     if (!response?.ok) {
       setError(response?.error || 'Nie udało się utworzyć pokoju.')
       return
     }
 
     setRoomState(response.room)
-    setShips(makeShipPool())
+    setShips(makeShipPool(response.room?.settings?.ships ?? normalizedShips))
     setError('')
     setupSocketListeners(getSocket())
   }
@@ -728,7 +1164,7 @@ function App() {
     }
 
     setRoomState(response.room)
-    setShips(makeShipPool())
+    setShips(makeShipPool(response.room?.settings?.ships ?? activeShipsConfig))
     setError('')
     setupSocketListeners(getSocket())
   }
@@ -769,7 +1205,7 @@ function App() {
           return rotatedShip
         }
 
-        if (!canPlaceShip(rotatedShip, ship.row, ship.col, occupiedFromPrev, boardConfig.boardSize)) {
+        if (!canPlaceShip(rotatedShip, ship.row, ship.col, occupiedFromPrev, activeBoardSize)) {
           setSetupError('Po obrocie statek nachodziłby na inny statek albo byłby zbyt blisko.')
           return ship
         }
@@ -827,7 +1263,7 @@ function App() {
 
       const occupiedFromPrev = buildOccupiedMap(prev)
 
-      if (!canPlaceShip(ship, startRow, startCol, occupiedFromPrev, boardConfig.boardSize)) {
+      if (!canPlaceShip(ship, startRow, startCol, occupiedFromPrev, activeBoardSize)) {
         setSetupError('Tu nie da się położyć statku. Statki nie mogą się stykać nawet rogami.')
         return prev
       }
@@ -907,8 +1343,8 @@ function App() {
     if (!roomState?.roomId) return
     setGameError('')
 
-    const rowLabel = boardConfig.rows[row]?.label
-    const colLabel = boardConfig.columns[col]?.label
+    const rowLabel = activeRows[row]?.label
+    const colLabel = activeColumns[col]?.label
     if (rowLabel && colLabel) speakWord(`${rowLabel} ${colLabel}`)
 
     const response = await withCallback('game:shoot', { roomId: roomState.roomId, row, col })
@@ -942,7 +1378,7 @@ function App() {
       setGameError(response?.error || 'Nie udało się rozpocząć rewanżu.')
       return
     }
-    setShips(makeShipPool())
+    setShips(makeShipPool(response.room?.settings?.ships ?? activeShipsConfig))
     setSetupError('')
     setRoomState(response.room)
   }
@@ -1029,6 +1465,121 @@ function App() {
           </div>
         )}
 
+        {showSettingsModal && !roomState && (
+          <div className="howto-backdrop" role="dialog" aria-modal="true" aria-labelledby="settings-title" onClick={() => setShowSettingsModal(false)}>
+            <div className="howto-modal" onClick={(event) => event.stopPropagation()}>
+              <div className="howto-header">
+                <h2 id="settings-title" className="h5 mb-0">Ustawienia gry</h2>
+                <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => setShowSettingsModal(false)} aria-label="Zamknij ustawienia">
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="howto-body">
+                <p className="small text-muted mb-3">Te ustawienia dotyczą nowego pokoju i są wybierane przez hosta.</p>
+
+                <div className="mb-3">
+                  <label className="form-label small mb-2">Poziom trudności (preset)</label>
+                  <div className="d-flex flex-wrap gap-2">
+                    {Object.entries(GAME_PRESETS).map(([presetId, preset]) => (
+                      <button
+                        key={presetId}
+                        type="button"
+                        className={`btn btn-sm ${selectedPresetId === presetId ? 'btn-primary' : 'btn-outline-primary'}`}
+                        aria-pressed={selectedPresetId === presetId}
+                        onClick={() => applyDraftPreset(presetId)}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="row g-2 mb-3">
+                  <div className="col-12 col-md-4">
+                    <label className="form-label small mb-1">Wielkość planszy</label>
+                    <select
+                      className="form-select"
+                      value={settingsDraft.boardSize}
+                      onChange={(event) => updateDraftBoardSize(Number(event.target.value))}
+                    >
+                      {Array.from({ length: Math.max(1, maxBoardSize - MIN_BOARD_SIZE + 1) }).map((_, index) => {
+                        const size = MIN_BOARD_SIZE + index
+                        return (
+                          <option key={size} value={size}>
+                            {size} x {size}
+                          </option>
+                        )
+                      })}
+                    </select>
+                  </div>
+                  <div className="col-12 col-md-8 d-flex align-items-end">
+                    <button type="button" className="btn btn-outline-secondary" onClick={rerollDraftAxes}>
+                      Losuj słowa osi
+                    </button>
+                  </div>
+                </div>
+
+                {capacityWarnings.length > 0 && (
+                  <div className="alert alert-warning py-2 small mb-3">
+                    ⚠️ Zmniejszono ilość statków, bo za dużo nie zmieści się na planszy:
+                    <ul className="mb-0 mt-1">
+                      {capacityWarnings.map((w) => (
+                        <li key={`warn-${w.size}`}>Rozmiar {w.size}: {w.from} → {w.to}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="d-flex align-items-center justify-content-between mb-2">
+                  <span className="small text-muted fw-semibold">Typy statków</span>
+                  <button type="button" className="btn btn-outline-primary btn-sm" onClick={addDraftShipType}>
+                    Dodaj typ
+                  </button>
+                </div>
+                <div className="vstack gap-2">
+                  {settingsDraft.ships.map((group, index) => (
+                    <div key={`ship-group-${index + 1}`} className="row g-2 align-items-end">
+                      <div className="col-6 col-md-4">
+                        <label className="form-label small mb-1">Rozmiar</label>
+                        <input
+                          type="number"
+                          className="form-control"
+                          min={1}
+                          max={settingsDraft.boardSize}
+                          value={group.size}
+                          onChange={(event) => updateDraftShip(index, 'size', event.target.value)}
+                        />
+                      </div>
+                      <div className="col-6 col-md-4">
+                        <label className="form-label small mb-1">Ilość (max {Math.max(group.count, draftShipMaxCounts[index] ?? 1)})</label>
+                        <input
+                          type="number"
+                          className="form-control"
+                          min={1}
+                          max={Math.max(group.count, draftShipMaxCounts[index] ?? 1)}
+                          value={group.count}
+                          onChange={(event) => updateDraftShip(index, 'count', event.target.value)}
+                        />
+                      </div>
+                      <div className="col-12 col-md-4 d-grid">
+                        <button
+                          type="button"
+                          className="btn btn-outline-danger"
+                          onClick={() => removeDraftShipType(index)}
+                          disabled={settingsDraft.ships.length <= 1}
+                        >
+                          Usuń typ
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── GAME PHASE ─────────────────────────────────────────────── */}
         {(game?.phase === 'playing' || game?.phase === 'finished') && (
           <div className="row g-4 justify-content-center">
@@ -1041,6 +1592,9 @@ function App() {
                   </span>
                 </h2>
                 <StaticGameBoard
+                  boardSize={activeBoardSize}
+                  rows={activeRows}
+                  columns={activeColumns}
                   ships={ships}
                   shotMarkers={opponentShotsMap}
                   isClickable={false}
@@ -1092,6 +1646,9 @@ function App() {
                   </span>
                 </div>
                 <StaticGameBoard
+                  boardSize={activeBoardSize}
+                  rows={activeRows}
+                  columns={activeColumns}
                   ships={opponentShipsForReview}
                   shotMarkers={myShotsMap}
                   isClickable={game.phase === 'playing'}
@@ -1105,10 +1662,10 @@ function App() {
               <div className="panel p-3">
                 <div className="d-flex flex-wrap gap-2 justify-content-center align-items-center">
                   <span className="small text-muted">Słowa koordynatów:</span>
-                  {boardConfig.rows.map((item) => (
+                  {activeRows.map((item) => (
                     <CoordinateChip key={item.id} item={item} />
                   ))}
-                  {boardConfig.columns.map((item) => (
+                  {activeColumns.map((item) => (
                     <CoordinateChip key={item.id} item={item} />
                   ))}
                 </div>
@@ -1134,6 +1691,16 @@ function App() {
                 </div>
 
                 <div className="d-grid gap-2 mb-3">
+                  {!roomState && (
+                    <button
+                      type="button"
+                      className="btn btn-outline-primary"
+                      onClick={() => setShowSettingsModal(true)}
+                    >
+                      Ustawienia gry
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     className="btn btn-primary"
@@ -1223,7 +1790,7 @@ function App() {
 
             <div className="col-12 col-xl-10">
               <div className="panel p-4 h-100">
-                <h2 className="h4 mb-3">Plansza ustawiania statków ({boardConfig.boardSize}x{boardConfig.boardSize})</h2>
+                <h2 className="h4 mb-3">Plansza ustawiania statków ({activeBoardSize}x{activeBoardSize})</h2>
 
                 <DndContext onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleShipDrop} onDragCancel={handleDragCancel}>
                   <div className="row g-3">
@@ -1235,7 +1802,7 @@ function App() {
                             type="button"
                             className="btn btn-outline-secondary btn-sm"
                             onClick={() => {
-                              const placed = autoPlaceShips(makeShipPool(), boardConfig.boardSize)
+                              const placed = autoPlaceShips(makeShipPool(activeShipsConfig), activeBoardSize)
                               if (placed) { setShips(placed); setSetupError('') }
                             }}
                           >
@@ -1259,9 +1826,9 @@ function App() {
 
                     <div className="col-12">
                       <div className="board-wrap board-wrap-centered">
-                        <div className="board-grid" style={{ gridTemplateColumns: `90px repeat(${boardConfig.boardSize}, ${BOARD_CELL_SIZE}px)` }}>
+                        <div className="board-grid" style={{ gridTemplateColumns: `90px repeat(${activeBoardSize}, ${BOARD_CELL_SIZE}px)` }}>
                           <div className="board-corner" />
-                          {boardConfig.columns.map((column) => {
+                          {activeColumns.map((column) => {
                             const Icon = icons[column.icon] || icons.Square
                             return (
                               <button
@@ -1276,7 +1843,7 @@ function App() {
                             )
                           })}
 
-                          {boardConfig.rows.map((row, rowIndex) => {
+                          {activeRows.map((row, rowIndex) => {
                             const Icon = icons[row.icon] || icons.Square
                             return (
                               <Fragment key={row.id}>
@@ -1289,7 +1856,7 @@ function App() {
                                 >
                                   <Icon size={16} />
                                 </button>
-                                {boardConfig.columns.map((column, colIndex) => {
+                                {activeColumns.map((column, colIndex) => {
                                   const cellKey = `${rowIndex}-${colIndex}`
                                   const shipInfo = cellToShipInfo(cellKey, ships)
                                   const inPreview = placementPreview.active && placementPreview.cells.includes(cellKey)
@@ -1342,14 +1909,14 @@ function App() {
 
                 <p className="small text-muted mb-2">Pion (wiersze)</p>
                 <div className="d-flex flex-wrap gap-2 mb-3">
-                  {boardConfig.rows.map((item) => (
+                  {activeRows.map((item) => (
                     <CoordinateChip key={item.id} item={item} />
                   ))}
                 </div>
 
                 <p className="small text-muted mb-2">Poziom (kolumny)</p>
                 <div className="d-flex flex-wrap gap-2">
-                  {boardConfig.columns.map((item) => (
+                  {activeColumns.map((item) => (
                     <CoordinateChip key={item.id} item={item} />
                   ))}
                 </div>

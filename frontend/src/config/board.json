@@ -1,6 +1,6 @@
 {
   "boardSize": 8,
-  "rows": [
+  "words": [
     { "id": "czapeczka", "label": "czapeczka", "icon": "HardHat" },
     { "id": "szczepienie", "label": "szczepienie", "icon": "Syringe" },
     { "id": "sztuczka", "label": "sztuczka", "icon": "WandSparkles" },
@@ -8,17 +8,22 @@
     { "id": "zuczek", "label": "żuczek", "icon": "Bug" },
     { "id": "deszcz", "label": "deszcz", "icon": "CloudRain" },
     { "id": "plazowicz", "label": "plażowicz", "icon": "Sun" },
-    { "id": "przyczepa", "label": "przyczepa", "icon": "Caravan" }
-  ],
-  "columns": [
-    { "id": "zaroweczka", "label": "żaróweczka", "icon": "Lightbulb" },
-    { "id": "rzeczka", "label": "rzeczka", "icon": "Waves" },
-    { "id": "szczypiorek", "label": "szczypiorek", "icon": "Leaf" },
-    { "id": "pieprzniczka", "label": "pieprzniczka", "icon": "Cherry" },
-    { "id": "pszczolka", "label": "pszczółka", "icon": "Flower2" },
-    { "id": "pozyczka", "label": "pożyczka", "icon": "Coins" },
-    { "id": "czaszka", "label": "czaszka", "icon": "Skull" },
-    { "id": "paszcza", "label": "paszcza", "icon": "Smile" }
+    { "id": "przyczepa", "label": "przyczepa", "icon": "Caravan" },
+    { "id": "odkurzacz", "label": "odkurzacz", "icon": "SprayCan" },
+    { "id": "nozyczki", "label": "nożyczki", "icon": "Scissors" },
+    { "id": "lozeczko", "label": "łóżeczko", "icon": "Bed" },
+    { "id": "lyzeczka", "label": "łyżeczka", "icon": "Soup" },
+    { "id": "poduszeczka", "label": "poduszeczka", "icon": "Cloud" },
+    { "id": "kaczuszka", "label": "kaczuszka", "icon": "Bird" },
+    { "id": "szczezuja", "label": "szczeżuja", "icon": "Shell" },
+    { "id": "paczuszka", "label": "paczuszka", "icon": "Package" },
+    { "id": "szczoteczka", "label": "szczoteczka", "icon": "Brush" },
+    { "id": "szafeczka", "label": "szafeczka", "icon": "Archive" },
+    { "id": "reczniczek", "label": "ręczniczek", "icon": "Shirt" },
+    { "id": "porzeczka", "label": "porzeczka", "icon": "Cherry" },
+    { "id": "trzepaczka", "label": "trzepaczka", "icon": "UtensilsCrossed" },
+    { "id": "szaliczek", "label": "szaliczek", "icon": "Shirt" },
+    { "id": "brzuszek", "label": "brzuszek", "icon": "Circle" }
   ],
   "ships": [
     { "size": 4, "count": 1 },
