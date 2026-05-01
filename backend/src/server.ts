@@ -11,6 +11,8 @@ type Player = {
   id: string;
   name: string;
   role: 'host' | 'guest';
+  connected: boolean;
+  lastSeenAt: number;
 };
 
 type ShipData = {
@@ -30,18 +32,24 @@ type ShotRecord = {
 };
 
 type GamePhase = 'waiting' | 'playing' | 'finished';
+type FinishReason = 'allShipsSunk' | 'surrender' | 'disconnect' | null;
 
 type Room = {
   id: string;
   players: Player[];
   readyByPlayerId: Record<string, boolean>;
   boardByPlayerId: Record<string, ShipData[]>;
+  disconnectTimersByPlayerId: Record<string, NodeJS.Timeout | null>;
   shots: ShotRecord[];
   currentTurnPlayerId: string | null;
   gamePhase: GamePhase;
   winnerPlayerId: string | null;
+  finishReason: FinishReason;
+  surrenderedPlayerId: string | null;
   createdAt: number;
 };
+
+const DISCONNECT_GRACE_MS = 20_000;
 
 const rowWords = [
   'czapeczka',
@@ -113,22 +121,33 @@ function getPublicGameState(room: Room) {
     phase: room.gamePhase,
     currentTurnPlayerId: room.currentTurnPlayerId,
     winnerPlayerId: room.winnerPlayerId,
+    finishReason: room.finishReason,
+    surrenderedPlayerId: room.surrenderedPlayerId,
     shots: room.shots,
     ...(room.gamePhase === 'finished' ? { boardByPlayerId: room.boardByPlayerId } : {}),
   };
 }
 
 function getPublicRoomState(room: Room) {
+  const connectedPlayers = room.players.filter((player) => player.connected);
   return {
     roomId: room.id,
     players: room.players.map((player) => ({
       ...player,
       ready: Boolean(room.readyByPlayerId[player.id]),
     })),
-    isReady: room.players.length === 2,
-    allPlayersReady: room.players.length === 2 && room.players.every((player) => Boolean(room.readyByPlayerId[player.id])),
+    isReady: connectedPlayers.length === 2,
+    allPlayersReady:
+      connectedPlayers.length === 2 && connectedPlayers.every((player) => Boolean(room.readyByPlayerId[player.id])),
     game: getPublicGameState(room),
   };
+}
+
+function clearDisconnectTimer(room: Room, playerId: string) {
+  const timer = room.disconnectTimersByPlayerId[playerId];
+  if (!timer) return;
+  clearTimeout(timer);
+  room.disconnectTimersByPlayerId[playerId] = null;
 }
 
 const app = express();
@@ -167,16 +186,23 @@ io.on('connection', (socket) => {
           id: socket.id,
           name: sanitizePlayerName(payload?.playerName || 'Kapitan'),
           role: 'host',
+          connected: true,
+          lastSeenAt: Date.now(),
         },
       ],
       readyByPlayerId: {
         [socket.id]: false,
       },
       boardByPlayerId: {},
+      disconnectTimersByPlayerId: {
+        [socket.id]: null,
+      },
       shots: [],
       currentTurnPlayerId: null,
       gamePhase: 'waiting',
       winnerPlayerId: null,
+      finishReason: null,
+      surrenderedPlayerId: null,
       createdAt: Date.now(),
     };
 
@@ -190,6 +216,7 @@ io.on('connection', (socket) => {
     'room:join',
     (payload: { roomId?: string; playerName?: string }, callback?: (response: unknown) => void) => {
       const roomId = payload?.roomId?.trim();
+      const sanitizedPlayerName = sanitizePlayerName(payload?.playerName || 'Nawigator');
       if (!roomId) {
         callback?.({ ok: false, error: 'Brak kodu pokoju.' });
         return;
@@ -202,19 +229,67 @@ io.on('connection', (socket) => {
       }
 
       const alreadyInRoom = room.players.some((player) => player.id === socket.id);
-      if (!alreadyInRoom && room.players.length >= 2) {
+      const reconnectCandidate = room.players.find(
+        (player) => !player.connected && player.name === sanitizedPlayerName,
+      );
+
+      if (!alreadyInRoom && !reconnectCandidate && room.players.length >= 2) {
         callback?.({ ok: false, error: 'Pokoj jest pelny.' });
         return;
       }
 
-      if (!alreadyInRoom) {
+      if (reconnectCandidate) {
+        const previousPlayerId = reconnectCandidate.id;
+        clearDisconnectTimer(room, previousPlayerId);
+
+        reconnectCandidate.id = socket.id;
+        reconnectCandidate.connected = true;
+        reconnectCandidate.lastSeenAt = Date.now();
+
+        room.readyByPlayerId[socket.id] = room.readyByPlayerId[previousPlayerId] ?? false;
+        room.boardByPlayerId[socket.id] = room.boardByPlayerId[previousPlayerId] ?? [];
+        room.disconnectTimersByPlayerId[socket.id] = null;
+
+        delete room.readyByPlayerId[previousPlayerId];
+        delete room.boardByPlayerId[previousPlayerId];
+        delete room.disconnectTimersByPlayerId[previousPlayerId];
+
+        if (room.currentTurnPlayerId === previousPlayerId) {
+          room.currentTurnPlayerId = socket.id;
+        }
+        if (room.winnerPlayerId === previousPlayerId) {
+          room.winnerPlayerId = socket.id;
+        }
+        if (room.surrenderedPlayerId === previousPlayerId) {
+          room.surrenderedPlayerId = socket.id;
+        }
+
+        room.shots = room.shots.map((shot) =>
+          shot.shooterId === previousPlayerId
+            ? {
+                ...shot,
+                shooterId: socket.id,
+              }
+            : shot,
+        );
+      } else if (!alreadyInRoom) {
         room.players.push({
           id: socket.id,
-          name: sanitizePlayerName(payload?.playerName || 'Nawigator'),
+          name: sanitizedPlayerName,
           role: 'guest',
+          connected: true,
+          lastSeenAt: Date.now(),
         });
         room.readyByPlayerId[socket.id] = false;
         room.boardByPlayerId[socket.id] = room.boardByPlayerId[socket.id] ?? [];
+        room.disconnectTimersByPlayerId[socket.id] = null;
+      } else {
+        const currentPlayer = room.players.find((player) => player.id === socket.id);
+        if (currentPlayer) {
+          currentPlayer.connected = true;
+          currentPlayer.lastSeenAt = Date.now();
+          clearDisconnectTimer(room, socket.id);
+        }
       }
 
       socket.join(roomId);
@@ -270,14 +345,18 @@ io.on('connection', (socket) => {
       }
 
       // Start game if both ready and both have boards submitted
-      const allReady = room.players.length === 2 && room.players.every((p) => room.readyByPlayerId[p.id]);
-      const allHaveBoards = room.players.every(
+      const connectedPlayers = room.players.filter((p) => p.connected);
+      const allReady = connectedPlayers.length === 2 && connectedPlayers.every((p) => room.readyByPlayerId[p.id]);
+      const allHaveBoards = connectedPlayers.every(
         (p) => Array.isArray(room.boardByPlayerId[p.id]) && room.boardByPlayerId[p.id].length > 0,
       );
 
       if (allReady && allHaveBoards && room.gamePhase === 'waiting') {
         room.gamePhase = 'playing';
         room.currentTurnPlayerId = room.players.find((p) => p.role === 'host')?.id ?? room.players[0].id;
+        room.winnerPlayerId = null;
+        room.finishReason = null;
+        room.surrenderedPlayerId = null;
         const publicState = getPublicRoomState(room);
         io.to(roomId).emit('game:started', publicState);
         callback?.({ ok: true, room: publicState });
@@ -310,9 +389,39 @@ io.on('connection', (socket) => {
       room.currentTurnPlayerId = null;
       room.gamePhase = 'waiting';
       room.winnerPlayerId = null;
+      room.finishReason = null;
+      room.surrenderedPlayerId = null;
 
       const publicState = getPublicRoomState(room);
       io.to(roomId).emit('room:state', publicState);
+      callback?.({ ok: true, room: publicState });
+    },
+  );
+
+  socket.on(
+    'game:surrender',
+    (payload: { roomId?: string }, callback?: (response: unknown) => void) => {
+      const roomId = payload?.roomId?.trim();
+      if (!roomId) { callback?.({ ok: false, error: 'Brak kodu pokoju.' }); return; }
+
+      const room = rooms.get(roomId);
+      if (!room) { callback?.({ ok: false, error: 'Pokoj nie istnieje.' }); return; }
+      if (room.gamePhase !== 'playing') { callback?.({ ok: false, error: 'Gra nie jest w toku.' }); return; }
+
+      const playerInRoom = room.players.some((p) => p.id === socket.id);
+      if (!playerInRoom) { callback?.({ ok: false, error: 'Gracz nie nalezy do tego pokoju.' }); return; }
+
+      const opponent = room.players.find((p) => p.id !== socket.id);
+      if (!opponent) { callback?.({ ok: false, error: 'Brak przeciwnika.' }); return; }
+
+      room.gamePhase = 'finished';
+      room.winnerPlayerId = opponent.id;
+      room.currentTurnPlayerId = null;
+      room.finishReason = 'surrender';
+      room.surrenderedPlayerId = socket.id;
+
+      const publicState = getPublicRoomState(room);
+      io.to(roomId).emit('game:state', publicState);
       callback?.({ ok: true, room: publicState });
     },
   );
@@ -374,6 +483,8 @@ io.on('connection', (socket) => {
         room.gamePhase = 'finished';
         room.winnerPlayerId = socket.id;
         room.currentTurnPlayerId = null;
+        room.finishReason = 'allShipsSunk';
+        room.surrenderedPlayerId = null;
         const publicState = getPublicRoomState(room);
         io.to(roomId).emit('game:state', publicState);
         callback?.({ ok: true, room: publicState });
@@ -393,26 +504,49 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     for (const room of rooms.values()) {
-      const playersBefore = room.players.length;
-      room.players = room.players.filter((player) => player.id !== socket.id);
+      const player = room.players.find((roomPlayer) => roomPlayer.id === socket.id);
+      if (!player) {
+        continue;
+      }
 
-      if (room.players.length !== playersBefore) {
+      player.connected = false;
+      player.lastSeenAt = Date.now();
+
+      clearDisconnectTimer(room, socket.id);
+      room.disconnectTimersByPlayerId[socket.id] = setTimeout(() => {
+        const stillDisconnected = room.players.some(
+          (roomPlayer) => roomPlayer.id === socket.id && !roomPlayer.connected,
+        );
+        if (!stillDisconnected) {
+          return;
+        }
+
+        room.players = room.players.filter((roomPlayer) => roomPlayer.id !== socket.id);
         delete room.readyByPlayerId[socket.id];
         delete room.boardByPlayerId[socket.id];
+        delete room.disconnectTimersByPlayerId[socket.id];
+
         if (room.players.length === 0) {
           rooms.delete(room.id);
-        } else {
-          // Forfeit if game was in progress
-          if (room.gamePhase === 'playing') {
-            room.gamePhase = 'finished';
-            room.winnerPlayerId = room.players[0].id;
-            room.currentTurnPlayerId = null;
-          }
-          io.to(room.id).emit('room:state', getPublicRoomState(room));
+          return;
         }
-      }
+
+        // Forfeit if game was in progress and player did not reconnect in time
+        if (room.gamePhase === 'playing') {
+          room.gamePhase = 'finished';
+          room.winnerPlayerId = room.players[0].id;
+          room.currentTurnPlayerId = null;
+          room.finishReason = 'disconnect';
+          room.surrenderedPlayerId = socket.id;
+        }
+
+        io.to(room.id).emit('room:state', getPublicRoomState(room));
+      }, DISCONNECT_GRACE_MS);
+
+      io.to(room.id).emit('room:state', getPublicRoomState(room));
     }
   });
+
 });
 
 httpServer.listen(PORT, () => {

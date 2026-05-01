@@ -1,13 +1,14 @@
-import { Fragment, useMemo, useState } from 'react'
-import { DndContext, useDraggable, useDroppable } from '@dnd-kit/core'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { DndContext, DragOverlay, useDraggable, useDroppable } from '@dnd-kit/core'
 import { io } from 'socket.io-client'
 import * as icons from 'lucide-react'
-import { Volume2, Copy, CheckCircle2, Link2, RotateCw, Ship, Droplets, Flame, Skull } from 'lucide-react'
+import { Volume2, Copy, CheckCircle2, Link2, RotateCw, Ship, Droplets, Flame, Skull, CircleHelp, X } from 'lucide-react'
 import boardConfig from './config/board.json'
 import { speakWord } from './utils/speech'
 import './App.css'
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3001'
+const BOARD_CELL_SIZE = 38
 
 let socketSingleton = null
 
@@ -181,33 +182,61 @@ function cellToShipInfo(cellKey, ships) {
   return null
 }
 
-function ShipDraggable({ ship, onRotate, onReset }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+function ShipDraggable({ ship, onRotate, onReset, isSelected, onSelect }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `pool-${ship.id}`,
     disabled: isPlaced(ship),
   })
 
   const style = {
-    transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
-    opacity: isDragging ? 0.6 : 1,
+    opacity: isDragging ? 0.35 : 1,
   }
 
   return (
-    <div ref={setNodeRef} style={style} className="ship-card border rounded p-2 bg-white shadow-sm">
-      <div className="d-flex align-items-center justify-content-between gap-2">
-        <button type="button" className="btn btn-sm btn-outline-primary" {...listeners} {...attributes} disabled={isPlaced(ship)}>
-          <Ship size={14} /> Statek {ship.size}
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`ship-card ${isPlaced(ship) ? 'ship-card-placed' : ''} ${isSelected ? 'ship-card-selected' : ''}`}
+      onClick={() => onSelect(ship.id)}
+    >
+      <div className="d-flex align-items-center justify-content-between gap-2 mb-1">
+        <button
+          type="button"
+          className="btn btn-sm btn-outline-primary ship-card-drag"
+          {...listeners}
+          {...attributes}
+          disabled={isPlaced(ship)}
+          title={`Przeciągnij statek ${ship.size}`}
+        >
+          <Ship size={14} />
+          <span>{ship.size}</span>
         </button>
-        <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => onRotate(ship.id)}>
+        <button
+          type="button"
+          className="btn btn-sm btn-outline-secondary"
+          onClick={(event) => {
+            event.stopPropagation()
+            onSelect(ship.id)
+            onRotate(ship.id)
+          }}
+          title="Obróć statek"
+        >
           <RotateCw size={14} />
         </button>
       </div>
-      <div className="small text-muted mt-1">
+      <div className="small text-muted ship-card-meta">
         {ship.orientation === 'horizontal' ? 'Poziomo' : 'Pionowo'}
         {isPlaced(ship) ? ' • na planszy' : ' • do ustawienia'}
       </div>
       {isPlaced(ship) && (
-        <button type="button" className="btn btn-link btn-sm px-0" onClick={() => onReset(ship.id)}>
+        <button
+          type="button"
+          className="btn btn-link btn-sm px-0"
+          onClick={(event) => {
+            event.stopPropagation()
+            onReset(ship.id)
+          }}
+        >
           Zdejmij z planszy
         </button>
       )}
@@ -215,14 +244,13 @@ function ShipDraggable({ ship, onRotate, onReset }) {
   )
 }
 
-function BoardShipDraggable({ ship }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+function BoardShipDraggable({ ship, isSelected, onSelect, isDropPulsed }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `board-${ship.id}`,
   })
 
   const style = {
-    transform: transform ? `translate3d(${transform.x}px, ${transform.y}px, 0)` : undefined,
-    opacity: isDragging ? 0.6 : 1,
+    opacity: isDragging ? 0.25 : 1,
   }
 
   return (
@@ -230,8 +258,9 @@ function BoardShipDraggable({ ship }) {
       ref={setNodeRef}
       style={style}
       type="button"
-      className="ship-piece ship-piece-draggable"
+      className={`ship-piece ship-piece-draggable ${isSelected ? 'ship-piece-selected' : ''} ${isDropPulsed ? 'ship-piece-drop-pulse' : ''}`}
       title={`Przesuń statek ${ship.size}`}
+      onClick={() => onSelect(ship.id)}
       {...listeners}
       {...attributes}
     >
@@ -240,20 +269,69 @@ function BoardShipDraggable({ ship }) {
   )
 }
 
-function BoardCell({ id, children, previewStatus, previewSegmentClass }) {
+function BoardCell({ id, children, previewStatus, previewSegmentClass, onClick }) {
   const { isOver, setNodeRef } = useDroppable({ id })
   return (
     <div
       ref={setNodeRef}
       className={`board-cell ${isOver ? 'board-cell-over' : ''} ${previewStatus === 'valid' ? 'board-cell-preview-valid' : ''} ${previewStatus === 'invalid' ? 'board-cell-preview-invalid' : ''} ${previewSegmentClass || ''}`}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={onClick ? (event) => { if (event.key === 'Enter' || event.key === ' ') onClick() } : undefined}
     >
       {children}
     </div>
   )
 }
 
-function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick }) {
+function ShipDragGhost({ ship }) {
+  const isVertical = ship.orientation === 'vertical'
+  return (
+    <div
+      className={`ship-drag-ghost ${isVertical ? 'ship-drag-ghost-vertical' : 'ship-drag-ghost-horizontal'}`}
+      style={{
+        gridTemplateColumns: isVertical ? '36px' : `repeat(${ship.size}, 36px)`,
+        gridTemplateRows: isVertical ? `repeat(${ship.size}, 36px)` : '36px',
+      }}
+      aria-hidden="true"
+    >
+      {Array.from({ length: ship.size }).map((_, index) => (
+        <div key={`${ship.id}-ghost-${index + 1}`} className="ship-drag-ghost-segment" />
+      ))}
+    </div>
+  )
+}
+
+function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick, lastShotCell }) {
   const boardSize = boardConfig.boardSize
+  const [hoveredCellTooltip, setHoveredCellTooltip] = useState(null)
+
+  function showCellTooltip(event, label) {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    const sidePadding = 10
+    const estimatedHalfWidth = 120
+    const preferredLeft = rect.left + rect.width / 2
+    const left = Math.max(sidePadding + estimatedHalfWidth, Math.min(preferredLeft, viewportWidth - sidePadding - estimatedHalfWidth))
+
+    const placeTop = rect.top >= 56
+    const top = placeTop ? rect.top - 10 : rect.bottom + 10
+    const placement = placeTop ? 'top' : 'bottom'
+
+    setHoveredCellTooltip({
+      label,
+      left,
+      top,
+      placement,
+      keepInsideBottom: top > viewportHeight - 16 ? viewportHeight - 16 : top,
+    })
+  }
+
+  function hideCellTooltip() {
+    setHoveredCellTooltip(null)
+  }
 
   const shipCellsMap = useMemo(() => {
     if (!ships) return {}
@@ -301,6 +379,7 @@ function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick 
                   marker === 'miss' ? 'game-cell-miss' : '',
                   marker === 'sunk' ? 'game-cell-sunk' : '',
                   isShootable ? 'game-cell-shootable' : '',
+                  lastShotCell === cellKey ? 'game-cell-last-shot' : '',
                 ].filter(Boolean).join(' ')
 
                 return (
@@ -309,9 +388,13 @@ function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick 
                     className={classNames}
                     role={isShootable ? 'button' : undefined}
                     tabIndex={isShootable ? 0 : undefined}
-                    title={isShootable ? `${row.label} – ${column.label}` : undefined}
-                    onClick={isShootable ? () => onCellClick(rowIndex, colIndex) : undefined}
-                    onKeyDown={isShootable ? (e) => { if (e.key === 'Enter' || e.key === ' ') onCellClick(rowIndex, colIndex) } : undefined}
+                    aria-label={isShootable ? `Pole ${row.label} ${column.label}` : undefined}
+                    onMouseEnter={isShootable ? (event) => showCellTooltip(event, `${row.label} – ${column.label}`) : undefined}
+                    onMouseLeave={isShootable ? hideCellTooltip : undefined}
+                    onFocus={isShootable ? (event) => showCellTooltip(event, `${row.label} – ${column.label}`) : undefined}
+                    onBlur={isShootable ? hideCellTooltip : undefined}
+                    onClick={isShootable ? () => { hideCellTooltip(); onCellClick(rowIndex, colIndex) } : undefined}
+                    onKeyDown={isShootable ? (e) => { if (e.key === 'Enter' || e.key === ' ') { hideCellTooltip(); onCellClick(rowIndex, colIndex) } } : undefined}
                   >
                     {marker === 'hit' && <Flame className="game-marker game-marker-hit" aria-hidden="true" />}
                     {marker === 'miss' && <Droplets className="game-marker game-marker-miss" aria-hidden="true" />}
@@ -323,6 +406,15 @@ function StaticGameBoard({ ships, shotMarkers, isClickable, myTurn, onCellClick 
           )
         })}
       </div>
+      {hoveredCellTooltip && (
+        <div
+          className={`game-cell-tooltip game-cell-tooltip-${hoveredCellTooltip.placement}`}
+          style={{ left: `${hoveredCellTooltip.left}px`, top: `${hoveredCellTooltip.keepInsideBottom}px` }}
+          aria-hidden="true"
+        >
+          {hoveredCellTooltip.label}
+        </div>
+      )}
     </div>
   )
 }
@@ -364,12 +456,47 @@ function App() {
   const [joinRoomId, setJoinRoomId] = useState('')
   const [roomState, setRoomState] = useState(null)
   const [error, setError] = useState('')
+  const [connectionState, setConnectionState] = useState(() => (getSocket().connected ? 'connected' : 'disconnected'))
   const [copied, setCopied] = useState(false)
   const [ships, setShips] = useState(() => makeShipPool())
   const [setupError, setSetupError] = useState('')
+  const [gameError, setGameError] = useState('')
+  const [showHowToPlay, setShowHowToPlay] = useState(false)
   const [dragState, setDragState] = useState({ shipId: null, overCellId: null })
+  const [selectedShipId, setSelectedShipId] = useState(null)
+  const [dropPulseShipId, setDropPulseShipId] = useState(null)
+  const dropPulseTimeoutRef = useRef(null)
+
+  useEffect(() => {
+    return () => {
+      if (dropPulseTimeoutRef.current) {
+        clearTimeout(dropPulseTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!showHowToPlay) {
+      return undefined
+    }
+
+    function handleEsc(event) {
+      if (event.key === 'Escape') {
+        setShowHowToPlay(false)
+      }
+    }
+
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', handleEsc)
+
+    return () => {
+      document.body.style.overflow = ''
+      window.removeEventListener('keydown', handleEsc)
+    }
+  }, [showHowToPlay])
 
   const occupiedMap = useMemo(() => buildOccupiedMap(ships), [ships])
+  const trimmedPlayerName = playerName.trim()
 
   const placementPreview = useMemo(() => {
     if (!dragState.shipId || !dragState.overCellId) {
@@ -402,12 +529,33 @@ function App() {
     }
   }, [dragState, ships, occupiedMap])
 
+  const activeDraggedShip = useMemo(() => {
+    if (!dragState.shipId) return null
+    return ships.find((ship) => ship.id === dragState.shipId) ?? null
+  }, [dragState.shipId, ships])
+
   const allShipsPlaced = ships.every((ship) => isPlaced(ship))
   const myPlayer = roomState?.players?.find((player) => player.id === getSocket().id)
 
   const game = roomState?.game ?? null
   const myId = getSocket().id
   const isMyTurn = game?.currentTurnPlayerId === myId
+
+  const finishedGameMessage = useMemo(() => {
+    if (game?.phase !== 'finished') return ''
+
+    if (game?.finishReason === 'surrender') {
+      if (game?.surrenderedPlayerId === myId) return '🏳️ Poddałeś się.'
+      return '🎉 Przeciwnik się poddał. Wygrywasz!'
+    }
+
+    if (game?.finishReason === 'disconnect') {
+      if (game?.winnerPlayerId === myId) return '🎉 Przeciwnik rozłączył się. Wygrywasz!'
+      return '😢 Rozłączono z grą.'
+    }
+
+    return game?.winnerPlayerId === myId ? '🎉 Wygrałeś! Gratulacje!' : '😢 Tym razem przegrałeś. Może następnym razem!'
+  }, [game, myId])
 
   const myShotsMap = useMemo(() => {
     const map = {}
@@ -440,6 +588,27 @@ function App() {
     return opponentId ? game.boardByPlayerId[opponentId] : null
   }, [game, myId, roomState])
 
+  const lastOpponentShotCell = useMemo(() => {
+    if (!game?.shots) return null
+    const shots = [...game.shots].reverse()
+    const last = shots.find((s) => s.shooterId !== myId)
+    return last ? `${last.row}-${last.col}` : null
+  }, [game?.shots, myId])
+
+  const opponentFleetStats = useMemo(() => {
+    const totalShips = boardConfig.ships.reduce((sum, group) => sum + group.count, 0)
+    const myShots = game?.shots?.filter((s) => s.shooterId === myId) ?? []
+    const sunk = myShots.filter((s) => s.result === 'sunk').length
+    const sunkCells = new Set()
+    myShots.forEach((s) => {
+      if (s.result === 'sunk' && s.sunkShipCells) {
+        s.sunkShipCells.forEach((c) => sunkCells.add(`${c.row}-${c.col}`))
+      }
+    })
+    const hitCells = myShots.filter((s) => s.result === 'hit' && !sunkCells.has(`${s.row}-${s.col}`)).length
+    return { totalShips, sunk, hitCells, remaining: totalShips - sunk }
+  }, [game?.shots, myId])
+
   const inviteUrl = useMemo(() => {
     if (!roomState?.roomId) {
       return ''
@@ -453,7 +622,19 @@ function App() {
   function withCallback(eventName, payload) {
     return new Promise((resolve) => {
       const socket = getSocket()
-      socket.emit(eventName, payload, (response) => resolve(response))
+      if (!socket.connected) {
+        resolve({ ok: false, error: 'Brak połączenia z serwerem. Spróbuj ponownie za chwilę.' })
+        return
+      }
+
+      const timeoutId = setTimeout(() => {
+        resolve({ ok: false, error: 'Serwer nie odpowiedział na czas. Sprawdź połączenie i spróbuj ponownie.' })
+      }, 6000)
+
+      socket.emit(eventName, payload, (response) => {
+        clearTimeout(timeoutId)
+        resolve(response)
+      })
     })
   }
 
@@ -474,8 +655,50 @@ function App() {
     socket.on('game:state', (nextState) => { setRoomState(nextState) })
   }
 
+  useEffect(() => {
+    const socket = getSocket()
+    setupSocketListeners(socket)
+
+    const handleConnect = async () => {
+      setConnectionState('connected')
+
+      if (!roomState?.roomId || !trimmedPlayerName) {
+        return
+      }
+
+      const response = await withCallback('room:join', {
+        roomId: roomState.roomId,
+        playerName: trimmedPlayerName,
+      })
+
+      if (!response?.ok) {
+        setError(response?.error || 'Utracono pokój po ponownym połączeniu.')
+        return
+      }
+
+      setRoomState(response.room)
+      setError('')
+    }
+
+    const handleDisconnect = () => {
+      setConnectionState('disconnected')
+    }
+
+    socket.on('connect', handleConnect)
+    socket.on('disconnect', handleDisconnect)
+
+    return () => {
+      socket.off('connect', handleConnect)
+      socket.off('disconnect', handleDisconnect)
+    }
+  }, [roomState?.roomId, trimmedPlayerName])
+
   async function createRoom() {
     setError('')
+    if (!trimmedPlayerName) {
+      setError('Wpisz swoje imię gracza, aby utworzyć pokój.')
+      return
+    }
     const response = await withCallback('room:create', { playerName })
     if (!response?.ok) {
       setError(response?.error || 'Nie udało się utworzyć pokoju.')
@@ -484,11 +707,16 @@ function App() {
 
     setRoomState(response.room)
     setShips(makeShipPool())
+    setError('')
     setupSocketListeners(getSocket())
   }
 
   async function joinRoom() {
     setError('')
+    if (!trimmedPlayerName) {
+      setError('Wpisz swoje imię gracza, aby dołączyć do pokoju.')
+      return
+    }
     const response = await withCallback('room:join', {
       roomId: joinRoomId,
       playerName,
@@ -501,6 +729,7 @@ function App() {
 
     setRoomState(response.room)
     setShips(makeShipPool())
+    setError('')
     setupSocketListeners(getSocket())
   }
 
@@ -589,6 +818,7 @@ function App() {
       return
     }
 
+    let placedSuccessfully = false
     setShips((prev) => {
       const ship = prev.find((item) => item.id === shipId)
       if (!ship) {
@@ -603,8 +833,19 @@ function App() {
       }
 
       setSetupError('')
+      placedSuccessfully = true
       return prev.map((item) => (item.id === shipId ? placeShipOnBoard(item, startRow, startCol) : item))
     })
+
+    if (placedSuccessfully) {
+      setDropPulseShipId(shipId)
+      if (dropPulseTimeoutRef.current) {
+        clearTimeout(dropPulseTimeoutRef.current)
+      }
+      dropPulseTimeoutRef.current = setTimeout(() => {
+        setDropPulseShipId(null)
+      }, 550)
+    }
 
     setDragState({ shipId: null, overCellId: null })
   }
@@ -616,6 +857,7 @@ function App() {
     }
 
     setDragState({ shipId, overCellId: null })
+    setSelectedShipId(shipId)
   }
 
   function handleDragOver(event) {
@@ -629,6 +871,11 @@ function App() {
 
   async function setReady(ready) {
     if (!roomState?.roomId) {
+      return
+    }
+
+    if (connectionState !== 'connected') {
+      setSetupError('Brak połączenia z serwerem. Poczekaj na ponowne połączenie.')
       return
     }
 
@@ -658,13 +905,17 @@ function App() {
 
   async function shoot(row, col) {
     if (!roomState?.roomId) return
+    setGameError('')
 
     const rowLabel = boardConfig.rows[row]?.label
     const colLabel = boardConfig.columns[col]?.label
     if (rowLabel && colLabel) speakWord(`${rowLabel} ${colLabel}`)
 
     const response = await withCallback('game:shoot', { roomId: roomState.roomId, row, col })
-    if (!response?.ok) return
+    if (!response?.ok) {
+      setGameError(response?.error || 'Nie udało się oddać strzału.')
+      return
+    }
 
     setRoomState(response.room)
 
@@ -685,10 +936,29 @@ function App() {
 
   async function rematch() {
     if (!roomState?.roomId) return
+    setGameError('')
     const response = await withCallback('game:rematch', { roomId: roomState.roomId })
-    if (!response?.ok) return
+    if (!response?.ok) {
+      setGameError(response?.error || 'Nie udało się rozpocząć rewanżu.')
+      return
+    }
     setShips(makeShipPool())
     setSetupError('')
+    setRoomState(response.room)
+  }
+
+  async function surrender() {
+    if (!roomState?.roomId || game?.phase !== 'playing') return
+    const confirmed = window.confirm('Czy na pewno chcesz się poddać i zakończyć tę grę?')
+    if (!confirmed) return
+
+    setGameError('')
+    const response = await withCallback('game:surrender', { roomId: roomState.roomId })
+    if (!response?.ok) {
+      setGameError(response?.error || 'Nie udało się poddać gry.')
+      return
+    }
+
     setRoomState(response.room)
   }
 
@@ -698,15 +968,66 @@ function App() {
         <div className="row justify-content-center">
           <div className="col-12 col-xl-10">
             <div className="hero-card p-4 p-md-5 mb-4">
-              <h1 className="display-6 mb-2">Logopedyczne Statki</h1>
+              <div className="d-flex align-items-center justify-content-between gap-3 flex-wrap mb-2">
+                <h1 className="display-6 mb-0">Logopedyczne Statki</h1>
+                <button type="button" className="btn btn-outline-primary btn-sm d-inline-flex align-items-center gap-2" onClick={() => setShowHowToPlay(true)}>
+                  <CircleHelp size={16} />
+                  Jak grać
+                </button>
+              </div>
               <p className="lead mb-0">
                 {game?.phase === 'playing' && (isMyTurn ? '👉 Twoja tura — wybierz cel na planszy przeciwnika!' : '⏳ Czekaj — tura przeciwnika...')}
-                {game?.phase === 'finished' && (game.winnerPlayerId === myId ? '🎉 Wygrałeś! Gratulacje!' : '😢 Tym razem przegrałeś. Może następnym razem!')}
+                {game?.phase === 'finished' && finishedGameMessage}
                 {(!game || game.phase === 'waiting') && 'Ustaw statki i zaproś przyjaciela do gry!'}
               </p>
             </div>
           </div>
         </div>
+
+        {showHowToPlay && (
+          <div className="howto-backdrop" role="dialog" aria-modal="true" aria-labelledby="howto-title" onClick={() => setShowHowToPlay(false)}>
+            <div className="howto-modal" onClick={(event) => event.stopPropagation()}>
+              <div className="howto-header">
+                <h2 id="howto-title" className="h5 mb-0">Jak grać w Logopedyczne Statki</h2>
+                <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => setShowHowToPlay(false)} aria-label="Zamknij instrukcję">
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="howto-body">
+                <h3 className="h6">1. Utworzenie pokoju</h3>
+                <p>Wpisz imię gracza i kliknij Utwórz pokój. Skopiuj link zaproszenia i wyślij go drugiej osobie.</p>
+
+                <h3 className="h6">2. Dołączenie do gry</h3>
+                <p>Drugi gracz wchodzi na podany link, wpisuje swoje imię, podaje kod pokoju lub używa opcji Wczytaj kod pokoju z linku, a potem klika Dołącz.</p>
+
+                <h3 className="h6">3. Ustawienie floty</h3>
+                <p>Przeciągnij statki na planszę. Możesz obracać statek i przesuwać go po planszy. Statki nie mogą się stykać, nawet po skosie.</p>
+
+                <h3 className="h6">4. Gotowość do startu</h3>
+                <p>Gdy wszystkie statki są ustawione, kliknij Jestem gotowy. Gra startuje, kiedy obaj gracze są gotowi.</p>
+
+                <h3 className="h6">5. Jak przebiega gra</h3>
+                <p>W swojej turze kliknij pole na planszy przeciwnika. Trafienie pozwala strzelać dalej, pudło oddaje turę przeciwnikowi.</p>
+
+                <h3 className="h6">5a. Koordynaty logopedyczne</h3>
+                <p>Koordynaty pól to logopedyczne słowa. Możesz je przeczytać i odsłuchać, klikając etykiety osi oraz sekcję Słowa koordynatów.</p>
+
+                <h3 className="h6">5b. Wymowa przed strzałem</h3>
+                <p>Przed oddaniem strzału gracz powinien powiedzieć nazwę pola na głos. Nazwa pola pojawia się natychmiast po najechaniu kursorem na pole strzału.</p>
+
+                <h3 className="h6">6. Wcześniejsze zakończenie</h3>
+                <p>Jeśli chcesz zakończyć partię, użyj przycisku Poddaj się podczas gry. Partia kończy się od razu.</p>
+
+                <h3 className="h6">7. Warunek zwycięstwa</h3>
+                <p>Wygrywa gracz, który pierwszy zatopi wszystkie statki przeciwnika lub gdy przeciwnik się podda.</p>
+
+                <h3 className="h6">8. Ponowna gra</h3>
+                <p>Po zakończeniu partii kliknij Zagraj jeszcze raz. Rozpoczynacie nową grę w tym samym pokoju.</p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── GAME PHASE ─────────────────────────────────────────────── */}
         {(game?.phase === 'playing' || game?.phase === 'finished') && (
@@ -725,6 +1046,7 @@ function App() {
                   isClickable={false}
                   myTurn={false}
                   onCellClick={null}
+                  lastShotCell={lastOpponentShotCell}
                 />
               </div>
             </div>
@@ -743,14 +1065,32 @@ function App() {
                 {game.phase === 'playing' && isMyTurn && (
                   <div className="alert alert-success py-2 mb-3">👆 Kliknij w komórkę, żeby strzelić!</div>
                 )}
+                {game.phase === 'playing' && (
+                  <div className="d-flex justify-content-end mb-3">
+                    <button type="button" className="btn btn-outline-danger btn-sm" onClick={surrender}>
+                      Poddaj się
+                    </button>
+                  </div>
+                )}
                 {game.phase === 'finished' && (
                   <div className={`alert py-2 mb-3 ${game.winnerPlayerId === myId ? 'alert-success' : 'alert-danger'}`}>
-                    {game.winnerPlayerId === myId ? '🎉 Wygrałeś!' : '😢 Tym razem przegrałeś.'}
+                    {finishedGameMessage}
                     <button type="button" className="btn btn-primary btn-sm ms-3" onClick={rematch}>
                       Zagraj jeszcze raz
                     </button>
                   </div>
                 )}
+                {gameError && <div className="alert alert-danger py-2 mb-3">{gameError}</div>}
+                <div className="d-flex flex-wrap gap-2 mb-3">
+                  <span className="badge text-bg-secondary">⚓ Flota: {opponentFleetStats.totalShips}</span>
+                  <span className="badge text-bg-danger">💀 Zatopione: {opponentFleetStats.sunk}</span>
+                  {opponentFleetStats.hitCells > 0 && (
+                    <span className="badge text-bg-warning text-dark">🔥 Uszkodzone: {opponentFleetStats.hitCells} seg.</span>
+                  )}
+                  <span className={`badge ${opponentFleetStats.remaining === 0 ? 'text-bg-success' : 'text-bg-light border'}`}>
+                    🛡️ Pozostało: {opponentFleetStats.remaining}
+                  </span>
+                </div>
                 <StaticGameBoard
                   ships={opponentShipsForReview}
                   shotMarkers={myShotsMap}
@@ -780,7 +1120,7 @@ function App() {
         {/* ── LOBBY + SETUP PHASE ─────────────────────────────────────── */}
         {(!game || game.phase === 'waiting') && (
           <div className="row g-4 justify-content-center">
-            <div className="col-12 col-lg-5">
+            <div className="col-12 col-xl-10">
               <div className="panel p-4 h-100">
                 <h2 className="h4 mb-3">Pokój gry</h2>
                 <div className="mb-3">
@@ -794,7 +1134,12 @@ function App() {
                 </div>
 
                 <div className="d-grid gap-2 mb-3">
-                  <button type="button" className="btn btn-primary" onClick={createRoom}>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={createRoom}
+                    disabled={!trimmedPlayerName}
+                  >
                     Utwórz pokój
                   </button>
                 </div>
@@ -806,7 +1151,12 @@ function App() {
                     onChange={(event) => setJoinRoomId(event.target.value)}
                     placeholder="Kod pokoju"
                   />
-                  <button type="button" className="btn btn-outline-primary" onClick={joinRoom}>
+                  <button
+                    type="button"
+                    className="btn btn-outline-primary"
+                    onClick={joinRoom}
+                    disabled={!trimmedPlayerName}
+                  >
                     Dołącz
                   </button>
                 </div>
@@ -849,47 +1199,67 @@ function App() {
                         type="button"
                         className="btn btn-success btn-sm"
                         onClick={() => setReady(true)}
-                        disabled={!allShipsPlaced || !roomState.isReady}
+                        disabled={!allShipsPlaced || !roomState.isReady || connectionState !== 'connected'}
                       >
                         Jestem gotowy
                       </button>
-                      <button type="button" className="btn btn-outline-secondary btn-sm" onClick={() => setReady(false)}>
+                      <button
+                        type="button"
+                        className="btn btn-outline-secondary btn-sm"
+                        onClick={() => setReady(false)}
+                        disabled={connectionState !== 'connected'}
+                      >
                         Cofnij gotowość
                       </button>
                     </div>
+                    {connectionState !== 'connected' && (
+                      <div className="alert alert-warning mt-3 mb-0">Trwa ponowne łączenie z serwerem...</div>
+                    )}
                     {roomState.allPlayersReady && <div className="alert alert-success mt-3 mb-0">Obaj gracze gotowi — trwa uruchamianie gry...</div>}
                   </div>
                 )}
               </div>
             </div>
 
-            <div className="col-12 col-lg-5">
+            <div className="col-12 col-xl-10">
               <div className="panel p-4 h-100">
                 <h2 className="h4 mb-3">Plansza ustawiania statków ({boardConfig.boardSize}x{boardConfig.boardSize})</h2>
 
                 <DndContext onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleShipDrop} onDragCancel={handleDragCancel}>
                   <div className="row g-3">
                     <div className="col-12">
-                      <div className="d-flex flex-wrap gap-2 align-items-start">
-                        {ships.map((ship) => (
-                          <ShipDraggable key={ship.id} ship={ship} onRotate={rotateShip} onReset={resetShip} />
-                        ))}
+                      <div className="setup-toolbar mb-3">
+                        <div className="setup-toolbar-header">
+                          <span className="small text-muted fw-semibold">Flota do ustawienia</span>
+                          <button
+                            type="button"
+                            className="btn btn-outline-secondary btn-sm"
+                            onClick={() => {
+                              const placed = autoPlaceShips(makeShipPool(), boardConfig.boardSize)
+                              if (placed) { setShips(placed); setSetupError('') }
+                            }}
+                          >
+                            🎲 Ustaw Losowo
+                          </button>
+                        </div>
+                        <div className="setup-ship-rail">
+                          {ships.map((ship) => (
+                            <ShipDraggable
+                              key={ship.id}
+                              ship={ship}
+                              onRotate={rotateShip}
+                              onReset={resetShip}
+                              isSelected={selectedShipId === ship.id}
+                              onSelect={setSelectedShipId}
+                            />
+                          ))}
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        className="btn btn-outline-secondary btn-sm mt-2"
-                        onClick={() => {
-                          const placed = autoPlaceShips(makeShipPool(), boardConfig.boardSize)
-                          if (placed) { setShips(placed); setSetupError('') }
-                        }}
-                      >
-                        🎲 Ustaw Statki Losowo
-                      </button>
                     </div>
 
                     <div className="col-12">
-                      <div className="board-wrap">
-                        <div className="board-grid" style={{ gridTemplateColumns: `90px repeat(${boardConfig.boardSize}, minmax(32px, 1fr))` }}>
+                      <div className="board-wrap board-wrap-centered">
+                        <div className="board-grid" style={{ gridTemplateColumns: `90px repeat(${boardConfig.boardSize}, ${BOARD_CELL_SIZE}px)` }}>
                           <div className="board-corner" />
                           {boardConfig.columns.map((column) => {
                             const Icon = icons[column.icon] || icons.Square
@@ -926,12 +1296,26 @@ function App() {
                                   const previewStatus = inPreview ? (placementPreview.isValid ? 'valid' : 'invalid') : null
                                   const previewSegmentClass = inPreview ? getPreviewSegmentClass(cellKey, placementPreview.cells) : ''
                                   return (
-                                    <BoardCell key={`${row.id}-${column.id}`} id={cellKey} previewStatus={previewStatus} previewSegmentClass={previewSegmentClass}>
+                                    <BoardCell
+                                      key={`${row.id}-${column.id}`}
+                                      id={cellKey}
+                                      previewStatus={previewStatus}
+                                      previewSegmentClass={previewSegmentClass}
+                                      onClick={shipInfo ? () => setSelectedShipId(shipInfo.ship.id) : undefined}
+                                    >
                                       {shipInfo && (
                                         shipInfo.isHead ? (
-                                          <BoardShipDraggable ship={shipInfo.ship} />
+                                          <BoardShipDraggable
+                                            ship={shipInfo.ship}
+                                            isSelected={selectedShipId === shipInfo.ship.id}
+                                            onSelect={setSelectedShipId}
+                                            isDropPulsed={dropPulseShipId === shipInfo.ship.id}
+                                          />
                                         ) : (
-                                          <div className="ship-piece ship-piece-body" title={`Statek ${shipInfo.ship.size}`} />
+                                          <div
+                                            className={`ship-piece ship-piece-body ${selectedShipId === shipInfo.ship.id ? 'ship-piece-selected' : ''} ${dropPulseShipId === shipInfo.ship.id ? 'ship-piece-drop-pulse' : ''}`}
+                                            title={`Statek ${shipInfo.ship.size}`}
+                                          />
                                         )
                                       )}
                                     </BoardCell>
@@ -944,6 +1328,9 @@ function App() {
                       </div>
                     </div>
                   </div>
+                  <DragOverlay dropAnimation={null}>
+                    {activeDraggedShip ? <ShipDragGhost ship={activeDraggedShip} /> : null}
+                  </DragOverlay>
                 </DndContext>
 
                 {setupError && <div className="alert alert-warning mt-3 mb-0">{setupError}</div>}
