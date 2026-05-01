@@ -1,6 +1,6 @@
 # Logopedyczne Statki
 
-A two-player Battleships game with speech-therapy coordinates — designed for children practising the pronunciation of difficult sounds in Polish.
+A two-player Battleships game with speech-therapy-style coordinates, built for playful Polish pronunciation practice.
 
 ## Running locally
 
@@ -14,31 +14,49 @@ cd frontend && npm install && npm run dev
 
 Frontend runs at `http://localhost:5173`, backend at `http://localhost:3001`.
 
-## Board configuration (`frontend/src/config/board.json`)
+## Game settings from UI (no JSON edits needed)
 
-The entire board — its size, coordinate labels and icons — is driven by a single JSON file. You can customise it without touching any code.
+You can configure core game parameters directly in the app before joining a room:
 
-### Board size
+- Open **Game settings** from the lobby.
+- Change board size.
+- Use ready presets: `easy`, `medium`, `hard`, `ultra`.
+- Fine-tune fleet composition: ship sizes and counts, add/remove ship types.
+- Re-roll coordinate words for the current draft.
+
+Important behavior:
+
+- Settings are applied when creating a room and shared with the other player in that room.
+- Capacity validation is automatic. If a fleet is too large for the selected board, the app clips it to a playable configuration and shows a warning.
+- Per-type limits are enforced in the form, so impossible counts cannot be entered.
+
+This means you can run many game variants without touching `frontend/src/config/board.json`.
+
+## Configuration file (`frontend/src/config/board.json`)
+
+The JSON file still defines defaults and the global word/icon pool used by the settings UI.
+
+### Default board size
 
 ```json
 "boardSize": 8
 ```
 
-Change to `6`, `10`, etc. The number of entries in `rows` and `columns` must match `boardSize`.
-
-### Rows and columns
-
-Each row and column is an object with three fields:
+### Coordinate word pool
 
 ```json
-{ "id": "unique-id", "label": "word to pronounce", "icon": "IconName" }
+"words": [
+  { "id": "unique-id", "label": "word to pronounce", "icon": "IconName" }
+]
 ```
 
-- **`label`** — the word displayed on the chip and read aloud by the speech synthesiser (pl-PL).
-- **`icon`** — the exact icon name from [lucide-react](https://lucide.dev/icons/) in PascalCase, e.g. `Waves`, `Skull`, `Flower2`.  
-  If the icon does not exist the cell falls back to `Square`.
+- **`id`**: unique identifier.
+- **`label`**: the text shown in the coordinate chip and spoken via speech synthesis (`pl-PL`).
+- **`icon`**: icon name from [lucide-react](https://lucide.dev/icons/) in PascalCase (for example `CloudRain`, `Cherry`, `Ship`).
 
-### Fleet
+Board size is dynamically limited by the size of this shared `words` pool.
+
+### Default fleet
 
 ```json
 "ships": [
@@ -49,64 +67,9 @@ Each row and column is an object with three fields:
 ]
 ```
 
-- **`size`** — ship length in cells.
-- **`count`** — how many ships of this size each player gets.
+- **`size`**: ship length in cells.
+- **`count`**: number of ships of that size.
 
 ## Finding icon names
 
-Go to [lucide.dev/icons](https://lucide.dev/icons/), find the icon you want and copy its PascalCase name (e.g. `CloudRain`, `Cherry`, `Drumstick`).
-
-
-## Uruchomienie lokalne
-
-```bash
-# backend
-cd backend && npm install && npm run dev
-
-# frontend (w drugim terminalu)
-cd frontend && npm install && npm run dev
-```
-
-Frontend działa na `http://localhost:5173`, backend na `http://localhost:3001`.
-
-## Konfiguracja planszy (`frontend/src/config/board.json`)
-
-Cały wygląd planszy — rozmiar, nazwy pól i ikony — jest sterowany przez jeden plik JSON. Możesz go edytować bez znajomości kodu.
-
-### Rozmiar planszy
-
-```json
-"boardSize": 8
-```
-
-Zmień na `6`, `10` itd. Liczba wierszy i kolumn musi odpowiadać liczbie pozycji w tablicach `rows` i `columns`.
-
-### Wiersze i kolumny
-
-Każdy wiersz i kolumna to obiekt z trzema polami:
-
-```json
-{ "id": "unikalne-id", "label": "słowo do wymówienia", "icon": "NazwaIkony" }
-```
-
-- **`label`** — słowo wyświetlane i odczytywane przez syntezę mowy (pl-PL).
-- **`icon`** — nazwa ikony z biblioteki [lucide-react](https://lucide.dev/icons/). Musi być dokładna (wielkość liter ma znaczenie), np. `Waves`, `Skull`, `Flower2`.  
-  Jeśli ikona nie istnieje, automatycznie zostanie użyta `Square`.
-
-### Flota statków
-
-```json
-"ships": [
-  { "size": 4, "count": 1 },
-  { "size": 3, "count": 2 },
-  { "size": 2, "count": 3 },
-  { "size": 1, "count": 4 }
-]
-```
-
-- **`size`** — długość statku w polach.
-- **`count`** — ile sztuk takiego statku ma każdy gracz.
-
-## Jak znaleźć nazwę ikony
-
-Wejdź na [lucide.dev/icons](https://lucide.dev/icons/), znajdź ikonę i skopiuj jej nazwę w formacie PascalCase (np. `CloudRain`, `Drumstick`, `Cherry`).
+Go to [lucide.dev/icons](https://lucide.dev/icons/), choose an icon, and copy its PascalCase name.
